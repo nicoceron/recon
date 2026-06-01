@@ -4,13 +4,25 @@ dist/
 # the tracked source directory `src/output/`.
 /output/
 /*-single/
+/*-output/
+/exports/
+/captures/
+/assets/
+*.html
+*.htm
+manifest.json
 .browser-data*/
 .framer-html-exporter-ready
 .diagnostic/
 .wrangler/
 screenshots/
 *.png
+*.jpg
+*.jpeg
+*.webp
+*.gif
 *.webm
+*.mp4
 .env
 .DS_Store
 *.log
