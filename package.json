@@ -1,0 +1,69 @@
+{
+  "name": "framer-html-exporter",
+  "version": "0.1.0",
+  "description": "Capture a published Framer page into one portable index.html file.",
+  "keywords": [
+    "framer",
+    "html-export",
+    "single-html",
+    "scraper",
+    "playwright",
+    "nocode",
+    "cli"
+  ],
+  "homepage": "https://github.com/nicoceron/framer-html-exporter#readme",
+  "bugs": {
+    "url": "https://github.com/nicoceron/framer-html-exporter/issues"
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/nicoceron/framer-html-exporter.git"
+  },
+  "license": "MIT",
+  "type": "module",
+  "bin": {
+    "framer-html-exporter": "./dist/cli.js"
+  },
+  "files": [
+    "dist",
+    "src",
+    "README.md",
+    "LICENSE"
+  ],
+  "scripts": {
+    "dev": "tsx src/cli.ts",
+    "build": "tsc",
+    "start": "node dist/cli.js",
+    "serve": "sirv output --port 3000 --single",
+    "typecheck": "tsc --noEmit",
+    "test": "vitest run",
+    "test:watch": "vitest",
+    "lint": "tsc --noEmit",
+    "postinstall": "playwright install chromium --with-deps || playwright install chromium || true"
+  },
+  "engines": {
+    "node": ">=20.6.0"
+  },
+  "dependencies": {
+    "cheerio": "^1.0.0",
+    "commander": "^12.1.0",
+    "mime-types": "^2.1.35",
+    "p-queue": "^8.0.1",
+    "parse-srcset": "^1.0.2",
+    "pino": "^9.5.0",
+    "pino-pretty": "^11.3.0",
+    "playwright": "^1.48.0",
+    "postcss": "^8.4.47",
+    "postcss-url": "^10.1.3",
+    "sirv-cli": "^2.0.2"
+  },
+  "devDependencies": {
+    "@types/mime-types": "^2.1.4",
+    "@types/node": "^20.16.10",
+    "@types/parse-srcset": "^1.0.0",
+    "@types/postcss-url": "^10.0.4",
+    "tsx": "^4.19.1",
+    "typescript": "^5.6.2",
+    "vitest": "^3.2.4"
+  }
+}

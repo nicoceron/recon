@@ -1,0 +1,26 @@
+node_modules/
+dist/
+# Anchor to repo root — without the leading slash, `output/` would also match
+# the tracked source directory `src/output/`.
+/output/
+/*-single/
+.browser-data*/
+.framer-html-exporter-ready
+.diagnostic/
+.wrangler/
+screenshots/
+*.png
+*.webm
+.env
+.DS_Store
+*.log
+.idea/
+.vscode/
+*.zip
+
+# Per-user Claude Code overrides (paths, ad-hoc allow-lists). Team-shared
+# `.claude/settings.json` and other `.claude/` files can still be committed.
+.claude/settings.local.json
+
+# MCP
+.playwright-mcp/
