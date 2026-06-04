@@ -48,4 +48,58 @@ describe('prepareSingleHtml', () => {
 
     expect(result.html).toContain('src="/assets/cdn.example.com/logo.png"');
   });
+
+  it('injects captured CSSOM for non-Framer pages', async () => {
+    const pages = new Map([
+      ['https://example.com/', '<html><head></head><body><div class="hero"></div></body></html>'],
+    ]);
+
+    const result = await prepareSingleHtml(pages, 'https://example.com', new AssetStore(), {
+      liveUrl: 'https://example.com/',
+      localizeAssets: false,
+      pageStyles: new Map([['https://example.com/', '.hero{color:red}']]),
+    });
+
+    expect(result.html).toContain('data-static-captured-cssom="1"');
+    expect(result.html).toContain('.hero{color:red}');
+  });
+
+  it('forces static app theme when requested', async () => {
+    const pages = new Map([
+      [
+        'https://example.com/',
+        `<html class="theme-root light"><head></head><body><script>
+          function setTheme(newTheme) { window.__theme = newTheme; }
+          var preferredTheme = "system";
+        </script></body></html>`,
+      ],
+    ]);
+
+    const result = await prepareSingleHtml(pages, 'https://example.com', new AssetStore(), {
+      liveUrl: 'https://example.com/',
+      localizeAssets: false,
+      forceTheme: 'dark',
+    });
+
+    expect(result.html).toContain('class="theme-root dark"');
+    expect(result.html).toContain('var preferredTheme = "dark";');
+  });
+
+  it('does not inject captured CSSOM for Framer pages', async () => {
+    const pages = new Map([
+      [
+        'https://example.com/',
+        '<html><head></head><body><div data-framer-hydrate-v2>Framer page</div></body></html>',
+      ],
+    ]);
+
+    const result = await prepareSingleHtml(pages, 'https://example.com', new AssetStore(), {
+      liveUrl: 'https://example.com/',
+      localizeAssets: false,
+      pageStyles: new Map([['https://example.com/', '.hero{color:red}']]),
+    });
+
+    expect(result.html).not.toContain('data-static-captured-cssom="1"');
+    expect(result.html).not.toContain('.hero{color:red}');
+  });
 });

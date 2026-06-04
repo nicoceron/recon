@@ -21,6 +21,16 @@ program
   .option('--no-scroll', 'Skip lazy-load scroll trigger')
   .option('--viewport-width <n>', 'Capture viewport width', (v) => parseInt(v, 10), 1440)
   .option('--localize-assets', 'Download and rewrite assets for offline/self-hosted use', false)
+  .option('--multi-page', 'Write every crawled page to its own local HTML file', false)
+  .option('--max-depth <n>', 'Same-origin crawl depth; defaults to 1 with --multi-page and 0 otherwise', (v) => parseInt(v, 10))
+  .option('--force-theme <theme>', 'Force captured page theme: light or dark')
+  .option(
+    '--include-url <url>',
+    'Additional same-origin URL to capture; repeatable',
+    (value: string, prev: string[] = []) => prev.concat(value),
+    [] as string[],
+  )
+  .option('--stay-local', 'Keep uncaptured same-origin links inside the local export instead of linking to the live site', false)
   .option(
     '--canonical-url <url>',
     'Override <link rel=canonical> and og:url in the export so the static site no longer advertises its Framer preview URL',
@@ -37,6 +47,7 @@ program
   .action(async (url: string, options: Record<string, unknown>) => {
     try {
       const subscribeUrl = options.subscribeUrl as string | undefined;
+      const forceTheme = parseForceTheme(options.forceTheme);
       await runExport({
         url,
         outDir: options.out as string,
@@ -44,6 +55,11 @@ program
         scroll: options.scroll as boolean,
         viewportWidth: options.viewportWidth as number,
         localizeAssets: options.localizeAssets as boolean,
+        multiPage: options.multiPage as boolean,
+        maxDepth: options.maxDepth as number | undefined,
+        includeUrls: options.includeUrl as string[] | undefined,
+        forceTheme,
+        stayLocal: options.stayLocal as boolean,
         userDataDir: path.resolve(options.userDataDir as string),
         canonicalUrl: options.canonicalUrl as string | undefined,
         stripSelectors: options.stripSelector as string[] | undefined,
@@ -78,3 +94,9 @@ program.parseAsync(process.argv).catch((err) => {
   logger.error({ err: (err as Error).message }, 'cli-error');
   process.exit(1);
 });
+
+function parseForceTheme(value: unknown): 'light' | 'dark' | undefined {
+  if (value === undefined) return undefined;
+  if (value === 'light' || value === 'dark') return value;
+  throw new Error('--force-theme must be "light" or "dark"');
+}
