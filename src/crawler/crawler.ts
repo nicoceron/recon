@@ -4,15 +4,21 @@ import { logger } from '../utils/logger.js';
 import { sleep } from '../utils/retry.js';
 import { normalizePageUrl, sameOrigin } from '../utils/urlUtils.js';
 import { extractInternalLinks } from './linkExtractor.js';
+import { inlineGoogleMapIframes } from './mapCapture.js';
+import { applyForcedTheme, installForcedTheme, type ForcedTheme } from './themeCapture.js';
 
 export interface CrawlOptions {
   startUrl: string;
+  /** Additional same-origin URLs to capture without relying on anchor discovery. */
+  additionalUrls?: string[];
   concurrency: number;
   maxDepth: number;
   viewportWidth: number;
   viewportHeight: number;
   scroll: boolean;
   pageTimeoutMs: number;
+  /** Force browser color scheme and root theme class during capture. */
+  forceTheme?: ForcedTheme;
   /**
    * If true, only crawl URLs whose path starts with the start URL's path.
    * Use for sandboxed previews like `framer.app/preview/<id>` where same-origin
@@ -24,6 +30,8 @@ export interface CrawlOptions {
 export interface CrawlResult {
   /** Map<normalized page URL, captured HTML> */
   pages: Map<string, string>;
+  /** Map<normalized page URL, accessible CSSOM captured after hydration/scroll> */
+  pageStyles: Map<string, string>;
   /** Origin (scheme://host) of the start URL */
   origin: string;
 }
@@ -53,8 +61,15 @@ export async function crawlSite(context: BrowserContext, opts: CrawlOptions): Pr
   };
 
   const pages = new Map<string, string>();
+  const pageStyles = new Map<string, string>();
   const visited = new Set<string>([startNormalized]);
   const queue: Array<{ url: string; depth: number }> = [{ url: startNormalized, depth: 0 }];
+  for (const additionalUrl of opts.additionalUrls ?? []) {
+    const normalized = normalizePageUrl(additionalUrl, startNormalized);
+    if (!normalized || !inScope(normalized) || visited.has(normalized)) continue;
+    visited.add(normalized);
+    queue.push({ url: normalized, depth: 1 });
+  }
   const pQueue = new PQueue({ concurrency: opts.concurrency });
 
   let inFlight = 0;
@@ -66,10 +81,11 @@ export async function crawlSite(context: BrowserContext, opts: CrawlOptions): Pr
       pQueue
         .add(async () => {
           try {
-            const html = await crawlOnePage(context, next.url, opts);
-            pages.set(next.url, html);
-            if (opts.maxDepth === 0 || next.depth < opts.maxDepth) {
-              const links = extractInternalLinks(html, next.url);
+            const captured = await crawlOnePage(context, next.url, opts);
+            pages.set(next.url, captured.html);
+            if (captured.styles?.trim()) pageStyles.set(next.url, captured.styles);
+            if (opts.maxDepth < 0 || next.depth < opts.maxDepth) {
+              const links = extractInternalLinks(captured.html, next.url);
               for (const link of links) {
                 if (!inScope(link)) continue;
                 if (visited.has(link)) continue;
@@ -91,16 +107,17 @@ export async function crawlSite(context: BrowserContext, opts: CrawlOptions): Pr
   await pQueue.onIdle();
 
   logger.info({ pages: pages.size, visited: visited.size, origin }, 'crawl-complete');
-  return { pages, origin };
+  return { pages, pageStyles, origin };
 }
 
 async function crawlOnePage(
   context: BrowserContext,
   url: string,
   opts: CrawlOptions,
-): Promise<string> {
+): Promise<{ html: string; styles?: string }> {
   const page = await context.newPage();
   await page.setViewportSize({ width: opts.viewportWidth, height: opts.viewportHeight });
+  await installForcedTheme(page, opts.forceTheme);
   try {
     logger.info({ url }, 'crawling-page');
     await page.goto(url, { waitUntil: 'domcontentloaded', timeout: opts.pageTimeoutMs });
@@ -111,14 +128,53 @@ async function crawlOnePage(
       logger.debug({ url }, 'networkidle-timeout-falling-back-to-load');
       await page.waitForLoadState('load', { timeout: 10_000 }).catch(() => undefined);
     }
+    await applyForcedTheme(page, opts.forceTheme);
 
     if (opts.scroll) {
       await scrollPage(page);
     }
 
-    return await page.content();
+    await applyForcedTheme(page, opts.forceTheme);
+    await inlineGoogleMapIframes(page, url);
+    await applyForcedTheme(page, opts.forceTheme);
+    await page.evaluate(() => window.scrollTo(0, 0)).catch(() => undefined);
+    await sleep(200);
+
+    const styles = await collectAccessibleCss(page);
+    return { html: await page.content(), styles };
   } finally {
     await page.close().catch(() => undefined);
+  }
+}
+
+async function collectAccessibleCss(page: Page): Promise<string> {
+  try {
+    const css = await page.evaluate(`(() => {
+      const seen = new Set();
+      const chunks = [];
+      function addCss(css) {
+        const text = String(css || '').trim();
+        if (!text || seen.has(text)) return;
+        seen.add(text);
+        chunks.push(text);
+      }
+
+      Array.from(document.styleSheets).forEach((sheet) => {
+        try {
+          if (!sheet.cssRules) return;
+          addCss(Array.from(sheet.cssRules).map((rule) => rule.cssText).join('\\n'));
+        } catch (_) {
+          // Cross-origin stylesheets can block cssRules; inline <style> tags are captured below.
+        }
+      });
+      Array.from(document.querySelectorAll('style')).forEach((style) => addCss(style.textContent || ''));
+
+      return chunks.join('\\n');
+    })()`);
+    return typeof css === 'string' ? css : '';
+  } catch (err) {
+    logger.debug({ err: (err as Error).message }, 'cssom-capture-error-ignored');
+    return '';
   }
 }
 

@@ -38,6 +38,16 @@ describe('rewriteHtml — asset URL rewriting', () => {
     const out = await rewriteHtml(html, baseCtx);
     expect(out).toContain('href="https://github.com/foo"');
   });
+
+  it('injects captured browser CSSOM and rewrites its asset URLs', async () => {
+    const html = `<html><head></head><body><div class="hero"></div></body></html>`;
+    const out = await rewriteHtml(html, {
+      ...baseCtx,
+      capturedPageCss: '.hero{background-image:url("https://cdn.example.com/img.png")}',
+    });
+    expect(out).toContain('data-static-captured-cssom="1"');
+    expect(out).toContain('background-image:url("/assets/cdn.example.com/img.png")');
+  });
 });
 
 describe('rewriteHtml — Framer owner-UI stripping', () => {
@@ -223,6 +233,28 @@ describe('rewriteHtml — static runtime fixes', () => {
     expect(out.indexOf('__turbopack_load_page_chunks__')).toBeLessThan(out.indexOf('/_next/static/chunks/app.js'));
   });
 
+  it('locks captured themes before local app boot scripts can follow system preference', async () => {
+    const html = `<html class="theme-root dark"><head></head><body><script>
+      (function() {
+        function setTheme(newTheme) { window.__theme = newTheme; }
+        var preferredTheme = "system";
+        setTheme(preferredTheme);
+      })();
+    </script></body></html>`;
+    const out = await rewriteHtml(html, { ...baseCtx, staticRuntimeFixes: true });
+    expect(out).toContain('data-static-theme-lock="1"');
+    expect(out).toContain('class="theme-root dark"');
+    expect(out).toContain('var preferredTheme = "dark";');
+    expect(out).not.toContain('var preferredTheme = "system";');
+  });
+
+  it('lets forceTheme override the captured document theme', async () => {
+    const html = `<html class="theme-root light"><head></head><body></body></html>`;
+    const out = await rewriteHtml(html, { ...baseCtx, staticRuntimeFixes: true, forceTheme: 'dark' });
+    expect(out).toContain('class="theme-root dark"');
+    expect(out).toContain('window.__theme=t');
+  });
+
   it('adds static button shims when runtime page routes are available', async () => {
     const html = `<html><body><button class="search-button" type="button"></button></body></html>`;
     const out = await rewriteHtml(html, {
@@ -235,6 +267,119 @@ describe('rewriteHtml — static runtime fixes', () => {
     expect(out).toContain('scheduleFallback');
     expect(out).toContain('bootStaticInteractions');
     expect(out).toContain('bootHoverAnimations');
+  });
+
+  it('installs captured map restoration for exported Google Maps iframes', async () => {
+    const html = `<html><body><img data-static-captured-map="1" data-static-map-src="https://www.google.com/maps/embed/v1/place?q=x" src="data:image/png;base64,abc"></body></html>`;
+    const out = await rewriteHtml(html, { ...baseCtx, staticRuntimeFixes: true });
+    expect(out).toContain('bootCapturedMaps');
+    expect(out).toContain('__STATIC_EXPORT_MAP_IMAGES');
+    expect(out).toContain('iframe[src*="google.com/maps/embed"]');
+  });
+
+  it('removes authenticated private email rows from static app captures', async () => {
+    const html = `<html><body><section><div class="attendee"><span>Nicolas Ceron</span><span>nicolas@example.com</span></div><p>Keep public event copy</p></section></body></html>`;
+    const out = await rewriteHtml(html, { ...baseCtx, staticRuntimeFixes: true });
+    expect(out).not.toContain('nicolas@example.com');
+    expect(out).not.toContain('Nicolas Ceron');
+    expect(out).toContain('Keep public event copy');
+  });
+
+  it('redacts profile/account settings form values in static app captures', async () => {
+    const html = `<html><body>
+      <main>
+        <h1>Settings</h1>
+        <h2>Your Profile</h2>
+        <label>First Name<input value="Nicolas"></label>
+        <label>Last Name<input value="Ceron"></label>
+        <label>Username<input value="ceron"></label>
+        <label>Website<input value="https://nicoceron.com"></label>
+        <label>Bio<textarea>private bio</textarea></label>
+        <section><h2>Phone Number</h2><div>+1 415 212 6297</div></section>
+        <div inert class="full-name-note">Your full name is set as “<span>Nicolas Ceron</span>”</div>
+        <div class="avatar-wrapper" style="background-image:url(https://example.com/avatar.png)"><img src="https://example.com/avatar.png"></div>
+      </main>
+    </body></html>`;
+    const out = await rewriteHtml(html, {
+      ...baseCtx,
+      pageUrl: 'https://example.com/settings',
+      staticRuntimeFixes: true,
+    });
+    expect(out).not.toContain('Nicolas');
+    expect(out).not.toContain('Ceron');
+    expect(out).not.toContain('ceron');
+    expect(out).not.toContain('private bio');
+    expect(out).not.toContain('+1 415 212 6297');
+    expect(out).not.toContain('background-image:url');
+    expect(out).toContain('Phone configured');
+  });
+
+  it('emits the interaction key class splitter with an escaped whitespace regex', async () => {
+    const html = `<html><body><button class="search-button" type="button"></button></body></html>`;
+    const out = await rewriteHtml(html, {
+      ...baseCtx,
+      staticRuntimeFixes: true,
+      runtimePageMap: { '/home': './home/index.html' },
+    });
+    expect(out).toContain('split(/\\s+/)');
+    expect(out).not.toContain('split(/s+/)');
+  });
+
+  it('sets the source origin for static button shims even without captured routes', async () => {
+    const html = `<html><body><button class="search-button" type="button"></button></body></html>`;
+    const out = await rewriteHtml(html, { ...baseCtx, staticRuntimeFixes: true });
+    expect(out).toContain('__STATIC_EXPORT_SITE_ORIGIN');
+    expect(out).toContain('https://example.com');
+    expect(out).toContain('forceLiveNavigation');
+  });
+
+  it('recognizes already-local stay-local hrefs to avoid rewrite loops', async () => {
+    const html = `<html><body><a href="/discover/index.html">Discover</a></body></html>`;
+    const out = await rewriteHtml(html, { ...baseCtx, staticRuntimeFixes: true, stayLocal: true });
+    expect(out).toContain('href="/discover/index.html"');
+    expect(out).toContain('isLocalExportPath');
+  });
+
+  it('allows local event-link anchors to open previews even without a wrapper control', async () => {
+    const html = `<html><body><a class="event-link content-link" href="/event/index.html">Event</a></body></html>`;
+    const out = await rewriteHtml(html, {
+      ...baseCtx,
+      staticRuntimeFixes: true,
+      stayLocal: true,
+      runtimeInteractionSnapshotMap: {
+        '/event/index.html': { html: '<aside data-static-captured-luma-panel="1">Event panel</aside>', kind: 'event-panel' },
+      },
+    });
+    expect(out).toContain('if(!stayLocal||!anchor)return false');
+    expect(out).toContain('openStaticCardPreview(anchorControl||directAnchor,directAnchor)');
+  });
+
+  it('animates captured overlays and supports nested interaction snapshots', async () => {
+    const parentKey = 'ik|button||Menu|menu-button#0';
+    const childKey = `${parentKey}>>ik|button||More|more-button#0`;
+    const html = `<html><body><button class="menu-button" type="button">Menu</button></body></html>`;
+    const out = await rewriteHtml(html, {
+      ...baseCtx,
+      staticRuntimeFixes: true,
+      runtimeInteractionSnapshotMap: {
+        [parentKey]: { html: '<div role="menu"><button class="more-button" type="button">More</button></div>', key: parentKey, kind: 'overlay' },
+        [childKey]: { html: '<div role="menu">More menu</div>', key: childKey, kind: 'overlay' },
+      },
+    });
+    expect(out).toContain('[data-static-generic-snapshot][data-static-open]');
+    expect(out).toContain('[data-static-modal-backdrop][data-static-open]');
+    expect(out).toContain('function nestedInteractionKey');
+    expect(out).toContain("parentKey+'>>'+base+'#'+index");
+    expect(out).toContain('openStaticInteractionSnapshotRecord(nestedSnapshot)');
+  });
+
+  it('sanitizes embedded Next user data in static captures', async () => {
+    const html = `<html><body><script id="__NEXT_DATA__" type="application/json">{"props":{"initialUserData":{"user":{"email":"person@example.com","centrifugo_user_token":"jwt","api_id":"usr_1","name":"Person"}},"pageProps":{}},"page":"/home"}</script></body></html>`;
+    const out = await rewriteHtml(html, { ...baseCtx, staticRuntimeFixes: true });
+    expect(out).not.toContain('person@example.com');
+    expect(out).not.toContain('centrifugo_user_token');
+    expect(out).not.toContain('usr_1');
+    expect(out).toContain('"page":"/home"');
   });
 
   it('emits syntactically valid static runtime scripts', async () => {
