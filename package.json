@@ -39,6 +39,7 @@
     "test": "vitest run",
     "test:watch": "vitest",
     "lint": "tsc --noEmit",
+    "vercel:prepare": "node scripts/prepare-vercel-static.mjs",
     "postinstall": "playwright install chromium --with-deps || playwright install chromium || true"
   },
   "engines": {

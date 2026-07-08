@@ -30,6 +30,11 @@ screenshots/
 .vscode/
 *.zip
 
+# Top-level deployment snapshots can be committed when they are intended for
+# static hosting, even though normal generated output stays ignored above.
+!/*-export/
+!/*-export/**
+
 # Per-user Claude Code overrides (paths, ad-hoc allow-lists). Team-shared
 # `.claude/settings.json` and other `.claude/` files can still be committed.
 .claude/settings.local.json
