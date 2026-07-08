@@ -30,77 +30,97 @@ export async function topupAssets(
   store: AssetStore,
 ): Promise<{ fetched: number; skipped: number; failed: number }> {
   const candidates = new Set<string>();
+  const scannedTextAssets = new Set<string>();
 
   for (const [pageUrl, html] of pages) {
     collectAssetUrls(html, pageUrl, candidates);
   }
 
-  // Also scan captured JSON / JS / text bodies — Framer often references additional
-  // breakpoint-specific image variants only inside its runtime asset manifests.
-  for (const rec of store.all()) {
-    const ct = rec.contentType.toLowerCase();
-    if (
-      ct.includes('json') ||
-      ct.includes('javascript') ||
-      ct.includes('text/css') ||
-      ct.includes('text/plain')
-    ) {
-      const text = rec.body.toString('utf8');
-      collectUrlsFromText(text, candidates, rec.url);
-    }
-  }
-
-  const missing: string[] = [];
-  for (const url of candidates) {
-    if (!store.has(url) && shouldFetchHost(url)) {
-      missing.push(url);
-    }
-  }
-
-  logger.info({ candidates: candidates.size, missing: missing.length }, 'topup-starting');
-
   let fetched = 0;
   let failed = 0;
-  let skipped = 0;
+  let skipped = candidates.size;
+  const failedUrls = new Set<string>();
 
   // Use Playwright's request context — sends cookies + UA from the existing session
   const request = context.request;
 
-  // Fetch in parallel batches of 8
+  // Scan captured and newly fetched JSON / JS / text bodies recursively. Framer
+  // can load tiny re-export modules that import the real bundle, so a single pass
+  // leaves reachable modules unfetched.
   const batchSize = 8;
-  for (let i = 0; i < missing.length; i += batchSize) {
-    const batch = missing.slice(i, i + batchSize);
-    await Promise.all(
-      batch.map(async (url) => {
-        try {
-          const response = await withRetry(
-            () => request.fetch(url, { timeout: 30_000, ignoreHTTPSErrors: true }),
-            { attempts: 2, label: `topup ${url}` },
-          );
-          const status = response.status();
-          if (status >= 400) {
-            logger.debug({ url, status }, 'topup-non-2xx');
+  for (;;) {
+    collectUrlsFromTextAssets(store, scannedTextAssets, candidates);
+
+    const missing: string[] = [];
+    for (const url of candidates) {
+      if (!store.has(url) && !failedUrls.has(url) && shouldFetchHost(url)) {
+        missing.push(url);
+      }
+    }
+
+    logger.info({ candidates: candidates.size, missing: missing.length }, 'topup-starting');
+    if (missing.length === 0) {
+      skipped = Math.max(0, candidates.size - fetched - failed);
+      break;
+    }
+
+    for (let i = 0; i < missing.length; i += batchSize) {
+      const batch = missing.slice(i, i + batchSize);
+      await Promise.all(
+        batch.map(async (url) => {
+          try {
+            const response = await withRetry(
+              () => request.fetch(url, { timeout: 30_000, ignoreHTTPSErrors: true }),
+              { attempts: 2, label: `topup ${url}` },
+            );
+            const status = response.status();
+            if (status >= 400) {
+              logger.debug({ url, status }, 'topup-non-2xx');
+              failedUrls.add(url);
+              failed += 1;
+              return;
+            }
+            const body = await response.body();
+            const contentType = response.headers()['content-type'] ?? '';
+            store.record(url, body, contentType);
+            fetched += 1;
+          } catch (err) {
+            logger.debug({ url, err: (err as Error).message }, 'topup-fetch-failed');
+            failedUrls.add(url);
             failed += 1;
-            return;
           }
-          const body = await response.body();
-          const contentType = response.headers()['content-type'] ?? '';
-          store.record(url, body, contentType);
-          fetched += 1;
-        } catch (err) {
-          logger.debug({ url, err: (err as Error).message }, 'topup-fetch-failed');
-          failed += 1;
-        }
-      }),
-    );
+        }),
+      );
+    }
+
+    skipped = candidates.size - fetched - failed;
   }
-  skipped = candidates.size - missing.length;
 
   const cmsFetched = await fetchFullFramerCmsFiles(context, store);
   fetched += cmsFetched;
 
   logger.info({ fetched, skipped, failed }, 'topup-complete');
   return { fetched, skipped, failed };
+}
+
+function collectUrlsFromTextAssets(store: AssetStore, scanned: Set<string>, candidates: Set<string>): void {
+  for (const rec of store.all()) {
+    if (scanned.has(rec.localPath)) continue;
+    const ct = rec.contentType.toLowerCase();
+    if (
+      !ct.includes('json') &&
+      !ct.includes('javascript') &&
+      !ct.includes('text/css') &&
+      !ct.includes('text/plain')
+    ) {
+      scanned.add(rec.localPath);
+      continue;
+    }
+
+    scanned.add(rec.localPath);
+    const text = rec.body.toString('utf8');
+    collectUrlsFromText(text, candidates, rec.url);
+  }
 }
 
 async function fetchFullFramerCmsFiles(context: BrowserContext, store: AssetStore): Promise<number> {
@@ -170,9 +190,29 @@ export function collectUrlsFromText(text: string, into: Set<string>, baseUrl?: s
     if (shouldFetchHost(raw)) into.add(raw);
   }
 
+  collectFramerCmsUrlsFromText(text, into);
+
   if (!baseUrl) return;
 
   collectRelativeModuleSpecifiers(text, baseUrl, into);
+}
+
+function collectFramerCmsUrlsFromText(text: string, into: Set<string>): void {
+  const pattern =
+    /new URL\(\s*(["'`])([^"'`]+\.framercms)\1\s*,\s*(["'`])(https?:\/\/(?:[a-z0-9-]+\.)*framerusercontent\.com\/modules\/[^"'`]+)\3\s*\)/gi;
+
+  for (const match of text.matchAll(pattern)) {
+    const relativePath = match[2];
+    const moduleBase = match[4];
+    if (!relativePath || !moduleBase) continue;
+    const absolute = tryParse(relativePath, moduleBase);
+    if (!absolute) continue;
+    absolute.pathname = absolute.pathname.replace('/modules/', '/cms/');
+    absolute.search = '';
+    absolute.hash = '';
+    const url = absolute.toString();
+    if (shouldFetchHost(url)) into.add(url);
+  }
 }
 
 function collectRelativeModuleSpecifiers(text: string, baseUrl: string, into: Set<string>): void {

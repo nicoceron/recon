@@ -32,7 +32,7 @@ export function rewriteJs(body: string, ctx: JsRewriteContext): string {
   if (totalReplacements > 0) {
     logger.debug({ deltaBytes: totalReplacements, prefixes: ctx.replacements.length }, 'js-rewrite-applied');
   }
-  return fixFramerCmsRangeHelpers(fixLocalNewUrlBases(out));
+  return fixVersionedJsModuleSuffixes(fixFramerCmsRangeHelpers(fixLocalNewUrlBases(out)));
 }
 
 /**
@@ -67,18 +67,37 @@ function fixFramerCmsRangeHelpers(body: string): string {
   );
 }
 
+function fixVersionedJsModuleSuffixes(body: string): string {
+  return body.replace(/(\.js@[A-Za-z0-9._-]+)(?=["'`])/g, (match) =>
+    match.endsWith('.js') ? match : `${match}.js`,
+  );
+}
+
 /**
  * Build the replacement table from the set of asset hosts we observed.
  * Each host gets two replacement entries: one for `https://host` → `/assets/host`,
  * and one for protocol-relative `//host` → `/assets/host`.
  */
-export function buildJsReplacements(hosts: Set<string>): JsRewriteContext['replacements'] {
+export function buildJsReplacements(
+  hosts: Set<string>,
+  assetUrlMap?: ReadonlyMap<string, string>,
+): JsRewriteContext['replacements'] {
   const sorted = Array.from(new Set([...hosts, 'framer.com'])).sort((a, b) => b.length - a.length);
+  const assetReplacements: Array<{ from: string; to: string }> = [];
+  if (assetUrlMap) {
+    for (const [url, localPath] of assetUrlMap) {
+      assetReplacements.push({ from: url, to: `/${localPath.replace(/\\/g, '/')}` });
+      if (url.startsWith('https://') || url.startsWith('http://')) {
+        assetReplacements.push({ from: url.replace(/^https?:/, ''), to: `/${localPath.replace(/\\/g, '/')}` });
+      }
+    }
+  }
   const out: Array<{ from: string; to: string }> = [];
   for (const host of sorted) {
     out.push({ from: `https://${host}`, to: `/assets/${host}` });
     out.push({ from: `http://${host}`, to: `/assets/${host}` });
     out.push({ from: `//${host}`, to: `/assets/${host}` });
   }
-  return out;
+  if (assetReplacements.length === 0) return out;
+  return [...assetReplacements, ...out].sort((a, b) => b.from.length - a.from.length);
 }
