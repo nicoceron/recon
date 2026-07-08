@@ -108,7 +108,7 @@ export async function runExport(opts: ExportCommandOptions): Promise<void> {
 
     if (shouldLocalizeAssets) {
       const hosts = collectHosts(store);
-      const jsReplacements = buildJsReplacements(hosts);
+      const jsReplacements = buildJsReplacements(hosts, store.urlMap());
       await writeAssets(outDir, store, true, hosts, jsReplacements);
     }
 

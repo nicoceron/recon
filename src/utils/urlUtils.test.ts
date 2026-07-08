@@ -81,6 +81,11 @@ describe('assetLocalPath', () => {
       'assets/cdn.example.com/img.webp',
     );
   });
+  it('appends JavaScript extension after versioned module suffixes for static-server MIME inference', () => {
+    expect(assetLocalPath('https://framer.com/m/phosphor-icons/Star.js@0.0.57', 'text/javascript')).toBe(
+      'assets/framer.com/m/phosphor-icons/Star.js@0.0.57.js',
+    );
+  });
   it('sanitises path-traversal segments', () => {
     expect(assetLocalPath('https://cdn.example.com/../etc/passwd')).not.toContain('..');
   });

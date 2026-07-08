@@ -59,6 +59,33 @@ describe('rewriteJs', () => {
     expect(out).toBe(`fetch("/assets/cdn.example.com/x")`);
   });
 
+  it('uses exact asset URL replacements before host prefix replacements', () => {
+    const replacements = buildJsReplacements(
+      new Set(['framer.com']),
+      new Map([
+        [
+          'https://framer.com/m/phosphor-icons/Star.js@0.0.57',
+          'assets/framer.com/m/phosphor-icons/Star.js@0.0.57.js',
+        ],
+      ]),
+    );
+    const out = rewriteJs('import("https://framer.com/m/phosphor-icons/Star.js@0.0.57")', { replacements });
+
+    expect(out).toBe('import("/assets/framer.com/m/phosphor-icons/Star.js@0.0.57.js")');
+  });
+
+  it('normalizes template-built versioned JavaScript module suffixes', () => {
+    const replacements = buildJsReplacements(new Set(['framer.com']));
+    const out = rewriteJs(
+      'const base=`https://framer.com/m/phosphor-icons/`;import(`${base}${name}.js@0.0.57`)',
+      { replacements },
+    );
+
+    expect(out).toBe(
+      'const base=`/assets/framer.com/m/phosphor-icons/`;import(`${base}${name}.js@0.0.57.js`)',
+    );
+  });
+
   it('keeps rewritten local paths valid when used as new URL bases', () => {
     const replacements = buildJsReplacements(new Set(['framerusercontent.com']));
     const input =

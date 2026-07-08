@@ -1,0 +1,21 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<svg width="128px" height="128px" viewBox="0 0 128 128" version="1.1" xmlns="http://www.w3.org/2000/svg" xmlns:xlink="http://www.w3.org/1999/xlink">
+	<title>Rhombus Copy</title>
+	<defs>
+		<rect id="path-1" x="0" y="0" width="128" height="128"></rect>
+	</defs>
+	<g id="Page-1" stroke="none" stroke-width="1" fill="none" fill-rule="evenodd">
+		<g id="Rhombus-Copy">
+			<mask id="mask-2" fill="white">
+				<use xlink:href="#path-1"></use>
+			</mask>
+			<use id="Rectangle" fill="#FFFFFF" xlink:href="#path-1"></use>
+			<polygon id="Path-12" fill="#000000" mask="url(#mask-2)" points="32 96 64 64 96 96 64 128"></polygon>
+			<polygon id="Path-12-Copy-4" fill="#000000" mask="url(#mask-2)" points="-32 96 -3.55271368e-15 64 32 96 -3.55271368e-15 128"></polygon>
+			<polygon id="Path-12-Copy-5" fill="#000000" mask="url(#mask-2)" points="96 96 128 64 160 96 128 128"></polygon>
+			<polygon id="Path-12-Copy" fill="#000000" mask="url(#mask-2)" points="32 32 64 -1.56750942e-15 96 32 64 64"></polygon>
+			<polygon id="Path-12-Copy-2" fill="#000000" mask="url(#mask-2)" points="96 32 128 -1.56750942e-15 160 32 128 64"></polygon>
+			<polygon id="Path-12-Copy-3" fill="#000000" mask="url(#mask-2)" points="-32 32 -3.55271368e-15 -1.56750942e-15 32 32 -3.55271368e-15 64"></polygon>
+		</g>
+	</g>
+</svg>

@@ -69,12 +69,22 @@ export function assetLocalPath(input: string, contentType?: string): string {
   const segments = rawPath.split('/').map(sanitizeSegment).filter(Boolean);
   let basename = segments.pop() ?? 'index';
 
-  if (!path.extname(basename)) {
-    const ext = extensionFromContentType(contentType);
-    if (ext) basename = `${basename}.${ext}`;
+  const ext = extensionFromContentType(contentType);
+  if (ext && shouldAppendContentTypeExtension(basename, ext)) {
+    basename = `${basename}.${ext}`;
   }
 
   return path.posix.join('assets', host, ...segments, basename);
+}
+
+function shouldAppendContentTypeExtension(basename: string, contentExt: string): boolean {
+  const currentExt = path.extname(basename).replace(/^\./, '').toLowerCase();
+  if (!currentExt) return true;
+  if (currentExt === contentExt.toLowerCase()) return false;
+
+  // URLs like /m/icons/Star.js@0.0.57 have a version suffix after the real
+  // extension. Static servers infer MIME from the final suffix, so append .js.
+  return basename.toLowerCase().includes(`.${contentExt.toLowerCase()}@`);
 }
 
 /**
