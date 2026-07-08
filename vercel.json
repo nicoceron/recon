@@ -4,7 +4,7 @@
   "buildCommand": "npm run build && npm run vercel:prepare",
   "outputDirectory": "dist/vercel",
   "cleanUrls": true,
-  "trailingSlash": false,
+  "trailingSlash": true,
   "headers": [
     {
       "source": "/:exportDir/assets/(.*)",
