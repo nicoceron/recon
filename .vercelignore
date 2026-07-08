@@ -1,0 +1,10 @@
+node_modules/
+.browser-data*/
+.context/
+.diagnostic/
+.playwright-mcp/
+captures/
+screenshots/
+*.log
+.env
+.DS_Store

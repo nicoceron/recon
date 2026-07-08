@@ -83,6 +83,24 @@ npm run build
 
 The Playwright browser profile lives in `./.browser-data` by default and is ignored by Git.
 
+## Vercel Deployment
+
+This repo includes a static Vercel deployment setup for committed export folders.
+Vercel runs `npm ci --ignore-scripts` so it does not download Playwright browsers,
+then runs `npm run build && npm run vercel:prepare`.
+
+`npm run vercel:prepare` copies every top-level `*-export` directory that contains
+an `index.html` file into `dist/vercel` and creates a simple index page linking to
+each export. For example, `vellix-export` is deployed at `/vellix-export/`.
+
+Run the same command locally to preview the deployment bundle:
+
+```bash
+npm run build
+npm run vercel:prepare
+npm run dev -- serve -o ./dist/vercel -p 4177
+```
+
 ## Limits
 
 - This is a single-page HTML extractor, not a Next.js/React decompiler.
