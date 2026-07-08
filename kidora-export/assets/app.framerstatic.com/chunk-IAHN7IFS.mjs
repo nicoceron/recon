@@ -1,0 +1,2 @@
+import{j as m}from"/assets/app.framerstatic.com/chunk-TMJLAZKH.mjs";import{t as n}from"/assets/app.framerstatic.com/chunk-77KJ37BP.mjs";var t=n();function a(r,o,e,i){m.isTest||m.debugPerformance&&(e||(e=performance.now()),e>=o&&(t?console.timeStamp(r,o,e,i):(performance.measure(r,{start:o,end:e,detail:{devtool:{track:i}}}),performance.clearMeasures(r))))}export{a};
+//# sourceMappingURL=/assets/app.framerstatic.com/chunk-IAHN7IFS.mjs.map
