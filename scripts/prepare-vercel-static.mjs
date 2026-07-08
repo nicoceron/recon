@@ -1,9 +1,28 @@
-import { cp, mkdir, readdir, rm, stat, writeFile } from "node:fs/promises";
+import {
+  cp,
+  mkdir,
+  readFile,
+  readdir,
+  rm,
+  stat,
+  writeFile,
+} from "node:fs/promises";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 
 const rootDir = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 const outputDir = path.join(rootDir, "dist", "vercel");
+const rewriteExtensions = new Set([
+  ".css",
+  ".framercms",
+  ".html",
+  ".js",
+  ".json",
+  ".mjs",
+  ".svg",
+  ".txt",
+  ".xml",
+]);
 
 async function exists(filePath) {
   try {
@@ -47,6 +66,46 @@ async function findExports() {
   }
 
   return exports.sort((a, b) => a.localeCompare(b));
+}
+
+async function* walkFiles(dir) {
+  const entries = await readdir(dir, { withFileTypes: true });
+
+  for (const entry of entries) {
+    const entryPath = path.join(dir, entry.name);
+
+    if (entry.isDirectory()) {
+      yield* walkFiles(entryPath);
+    } else if (entry.isFile()) {
+      yield entryPath;
+    }
+  }
+}
+
+function shouldRewriteAssetUrls(filePath) {
+  return rewriteExtensions.has(path.extname(filePath));
+}
+
+async function rewriteExportAssetUrls(exportDir) {
+  const exportOutputDir = path.join(outputDir, exportDir);
+  const assetPrefix = `/${exportDir}/assets/`;
+  const rootAssetUrlPattern = /(^|["'(=\s,])\/assets\//g;
+
+  for await (const filePath of walkFiles(exportOutputDir)) {
+    if (!shouldRewriteAssetUrls(filePath)) {
+      continue;
+    }
+
+    const source = await readFile(filePath, "utf8");
+    const rewritten = source.replace(
+      rootAssetUrlPattern,
+      (_match, prefix) => `${prefix}${assetPrefix}`,
+    );
+
+    if (rewritten !== source) {
+      await writeFile(filePath, rewritten);
+    }
+  }
 }
 
 function renderIndex(exportDirs) {
@@ -162,6 +221,7 @@ for (const dir of exportDirs) {
   await cp(path.join(rootDir, dir), path.join(outputDir, dir), {
     recursive: true,
   });
+  await rewriteExportAssetUrls(dir);
 }
 
 await writeFile(path.join(outputDir, "index.html"), renderIndex(exportDirs));

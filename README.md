@@ -91,7 +91,9 @@ then runs `npm run build && npm run vercel:prepare`.
 
 `npm run vercel:prepare` copies every top-level `*-export` directory that contains
 an `index.html` file into `dist/vercel` and creates a simple index page linking to
-each export. For example, `vellix-export` is deployed at `/vellix-export/`.
+each export. It also rewrites root-absolute `/assets/` references in the deployment
+copy so each export resolves assets from its own directory. For example,
+`vellix-export` is deployed at `/vellix-export/`.
 
 Run the same command locally to preview the deployment bundle:
 
