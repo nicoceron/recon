@@ -89,7 +89,7 @@ function shouldRewriteAssetUrls(filePath) {
 async function rewriteExportAssetUrls(exportDir) {
   const exportOutputDir = path.join(outputDir, exportDir);
   const assetPrefix = `/${exportDir}/assets/`;
-  const rootAssetUrlPattern = /(^|["'(=\s,])\/assets\//g;
+  const rootAssetUrlPattern = /(^|["'`(=\s,])\/assets\//g;
 
   for await (const filePath of walkFiles(exportOutputDir)) {
     if (!shouldRewriteAssetUrls(filePath)) {
@@ -109,14 +109,17 @@ async function rewriteExportAssetUrls(exportDir) {
 }
 
 function renderIndex(exportDirs) {
-  const links = exportDirs
-    .map((dir) => {
-      const title = titleFromExportDir(dir);
-      return `<a class="site-link" href="./${escapeHtml(dir)}/"><span>${escapeHtml(
-        title,
-      )}</span><code>/${escapeHtml(dir)}</code></a>`;
-    })
-    .join("\n");
+  const links =
+    exportDirs.length > 0
+      ? exportDirs
+          .map((dir) => {
+            const title = titleFromExportDir(dir);
+            return `<a class="site-link" href="./${escapeHtml(dir)}/"><span>${escapeHtml(
+              title,
+            )}</span><code>/${escapeHtml(dir)}</code></a>`;
+          })
+          .join("\n")
+      : `<p class="empty">No local <code>*-export</code> folders were found in this checkout.</p>`;
 
   return `<!doctype html>
 <html lang="en">
@@ -185,6 +188,12 @@ function renderIndex(exportDirs) {
         font-size: 13px;
         overflow-wrap: anywhere;
       }
+      .empty {
+        padding: 18px 20px;
+        border: 1px solid #dfe3e8;
+        border-radius: 8px;
+        background: #ffffff;
+      }
       @media (max-width: 560px) {
         body { place-items: start; }
         .site-link {
@@ -198,7 +207,7 @@ function renderIndex(exportDirs) {
   <body>
     <main>
       <h1>Framer HTML Exports</h1>
-      <p>Static captures packaged from the top-level <code>*-export</code> directories in this repository.</p>
+      <p>Static captures packaged from local top-level <code>*-export</code> directories.</p>
       <nav aria-label="Exported sites">
         ${links}
       </nav>
@@ -209,10 +218,6 @@ function renderIndex(exportDirs) {
 }
 
 const exportDirs = await findExports();
-
-if (exportDirs.length === 0) {
-  throw new Error("No top-level *-export directories with index.html were found.");
-}
 
 await rm(outputDir, { recursive: true, force: true });
 await mkdir(outputDir, { recursive: true });

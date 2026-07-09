@@ -22,7 +22,8 @@ program
   .option('--viewport-width <n>', 'Capture viewport width', (v) => parseInt(v, 10), 1440)
   .option('--localize-assets', 'Download and rewrite assets for offline/self-hosted use', false)
   .option('--multi-page', 'Write every crawled page to its own local HTML file', false)
-  .option('--max-depth <n>', 'Same-origin crawl depth; defaults to 1 with --multi-page and 0 otherwise', (v) => parseInt(v, 10))
+  .option('--full-site', 'Framer full-site preset: --localize-assets --multi-page --stay-local', false)
+  .option('--max-depth <n>', 'Same-origin crawl depth; defaults to 3 with --multi-page and 0 otherwise', (v) => parseInt(v, 10))
   .option('--force-theme <theme>', 'Force captured page theme: light or dark')
   .option(
     '--include-url <url>',
@@ -48,18 +49,19 @@ program
     try {
       const subscribeUrl = options.subscribeUrl as string | undefined;
       const forceTheme = parseForceTheme(options.forceTheme);
+      const fullSite = options.fullSite as boolean;
       await runExport({
         url,
         outDir: options.out as string,
         headed: options.headed as boolean,
         scroll: options.scroll as boolean,
         viewportWidth: options.viewportWidth as number,
-        localizeAssets: options.localizeAssets as boolean,
-        multiPage: options.multiPage as boolean,
+        localizeAssets: (options.localizeAssets as boolean) || fullSite,
+        multiPage: (options.multiPage as boolean) || fullSite,
         maxDepth: options.maxDepth as number | undefined,
         includeUrls: options.includeUrl as string[] | undefined,
         forceTheme,
-        stayLocal: options.stayLocal as boolean,
+        stayLocal: (options.stayLocal as boolean) || fullSite,
         userDataDir: path.resolve(options.userDataDir as string),
         canonicalUrl: options.canonicalUrl as string | undefined,
         stripSelectors: options.stripSelector as string[] | undefined,

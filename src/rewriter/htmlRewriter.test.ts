@@ -340,6 +340,38 @@ describe('rewriteHtml — static runtime fixes', () => {
     expect(out).toContain('isLocalExportPath');
   });
 
+  it('forces local static page links through document navigation', async () => {
+    const html = `<html><body><a href="https://example.com/discover">Discover</a></body></html>`;
+    const out = await rewriteHtml(html, {
+      ...baseCtx,
+      staticRuntimeFixes: true,
+      stayLocal: true,
+      runtimePageMap: { '/discover': '/discover/index.html' },
+      pageLookup: () => '/discover/index.html',
+    });
+    expect(out).toContain('target=localTarget(raw)|| (stayLocal?localPathForUrl(u):u.href)');
+    expect(out).toContain('location.href=target');
+    expect(out).not.toContain('if(localTarget(raw))return');
+  });
+
+  it('injects local route interception for Framer multi-page exports without static shims', async () => {
+    const html = `<html><head><script data-framer-bundle="main" src="/assets/main.mjs"></script></head><body><a href="https://example.com/discover">Discover</a></body></html>`;
+    const out = await rewriteHtml(html, {
+      ...baseCtx,
+      staticRuntimeFixes: false,
+      stayLocal: true,
+      runtimePageMap: { '/discover': '/discover/index.html' },
+      pageLookup: () => '/discover/index.html',
+    });
+    expect(out).toContain('__STATIC_EXPORT_PAGE_MAP');
+    expect(out).toContain('releaseStaticPreloaders');
+    expect(out).toContain('currentMatchesKnownLocalPath');
+    expect(out).toContain("document.querySelector('[data-framer-hydrate-v2],[data-framer-root]')");
+    expect(out).toContain('new MutationObserver(maintainStaticExport)');
+    expect(out).not.toContain('bootStaticInteractions');
+    expect(out.indexOf('__STATIC_EXPORT_PAGE_MAP')).toBeLessThan(out.indexOf('data-framer-bundle="main"'));
+  });
+
   it('allows local event-link anchors to open previews even without a wrapper control', async () => {
     const html = `<html><body><a class="event-link content-link" href="/event/index.html">Event</a></body></html>`;
     const out = await rewriteHtml(html, {
