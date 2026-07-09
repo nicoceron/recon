@@ -34,7 +34,8 @@ framer-html-exporter export <url> [options]
       --viewport-width <n>  Capture viewport width             default: 1440
       --localize-assets     Download and rewrite assets locally
       --multi-page          Write crawled same-origin pages as local HTML files
-      --max-depth <n>       Same-origin crawl depth             default: 1 with --multi-page, else 0
+      --full-site           Framer full-site preset: local assets, multi-page, stay-local
+      --max-depth <n>       Same-origin crawl depth             default: 3 with --multi-page, else 0
       --force-theme <theme> Force captured page theme: light or dark
       --include-url <url>   Additional same-origin URL to capture; repeatable
       --stay-local          Keep uncaptured same-origin links inside the local export
@@ -54,6 +55,7 @@ For local development, run the same commands through `npm run dev --`:
 ```bash
 npm run dev -- export https://altrix.framer.ai/ -o ./altrix-single
 npm run dev -- export https://syntiro.framer.website/ -o ./syntiro-single --localize-assets
+npm run dev -- export https://allintitarvl.framer.website/ -o ./allintitarvl-export --full-site
 npm run dev -- export https://luma.com/ -o ./luma-local --multi-page --stay-local --force-theme dark --include-url https://luma.com/settings
 npm run dev -- serve -o ./altrix-single -p 4177
 ```
@@ -65,6 +67,8 @@ Default mode hotlinks remote assets/runtime URLs where possible. This is the mos
 For non-Framer pages, the exporter also captures the browser-accessible CSSOM after hydration and injects it into each exported page. This preserves runtime-loaded framework styles, authenticated app UI states, and interaction surfaces that are not fully represented by the original HTML alone.
 
 `--localize-assets` downloads captured assets into `assets/` and rewrites references to local paths. Use it when you need offline/self-hosted files. It is slower and can miss runtime-built URLs if the page did not request them during capture.
+
+For published Framer sites, prefer `--full-site`. It enables `--localize-assets`, `--multi-page`, and `--stay-local`; the multi-page crawl captures three same-origin link levels by default so index pages and nested detail pages are included without hand-tuning `--max-depth`.
 
 ## Accepted URLs
 
@@ -85,7 +89,7 @@ The Playwright browser profile lives in `./.browser-data` by default and is igno
 
 ## Vercel Deployment
 
-This repo includes a static Vercel deployment setup for committed export folders.
+This repo includes a static Vercel deployment setup for local export folders.
 Vercel runs `npm ci --ignore-scripts` so it does not download Playwright browsers,
 then runs `npm run build && npm run vercel:prepare`.
 
@@ -95,7 +99,9 @@ each export. It also rewrites root-absolute `/assets/` references in the deploym
 copy so each export resolves assets from its own directory. For example,
 `vellix-export` is deployed at `/vellix-export/`.
 
-Run the same command locally to preview the deployment bundle:
+Generated export folders are ignored by Git so the repository stays focused on the
+extractor. Run the same command locally to preview a deployment bundle from local
+exports:
 
 ```bash
 npm run build

@@ -17,7 +17,7 @@ export async function runServe(opts: ServeOptions): Promise<void> {
   logger.info({ dir: abs, port: opts.port }, 'starting-static-server');
   process.stderr.write(`\nServing ${abs} on http://localhost:${opts.port}\n\n`);
 
-  const child = spawn('npx', ['sirv-cli', abs, '--port', String(opts.port), '--single', '--quiet'], {
+  const child = spawn('npx', ['sirv-cli', abs, '--port', String(opts.port), '--quiet'], {
     stdio: 'inherit',
     shell: process.platform === 'win32',
   });

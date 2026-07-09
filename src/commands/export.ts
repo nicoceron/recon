@@ -15,6 +15,8 @@ import { logger } from '../utils/logger.js';
 import { isTextual } from '../utils/mimeUtils.js';
 import { normalizePageUrl, pageLocalPath, rootRelativeAssetPath, sameOrigin } from '../utils/urlUtils.js';
 
+const DEFAULT_MULTI_PAGE_MAX_DEPTH = 3;
+
 export interface ExportCommandOptions {
   url: string;
   outDir: string;
@@ -80,7 +82,7 @@ export async function runExport(opts: ExportCommandOptions): Promise<void> {
       startUrl: liveUrl,
       additionalUrls: opts.includeUrls,
       concurrency: 1,
-      maxDepth: opts.maxDepth ?? (opts.multiPage ? 1 : 0),
+      maxDepth: opts.maxDepth ?? (opts.multiPage ? DEFAULT_MULTI_PAGE_MAX_DEPTH : 0),
       viewportWidth: opts.viewportWidth,
       viewportHeight: 900,
       scroll: opts.scroll,
