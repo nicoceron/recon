@@ -4,6 +4,7 @@ import path from 'node:path';
 import { buildExportJobs, runConcurrently, type ExportJob } from './commands/batchExport.js';
 import { runExport } from './commands/export.js';
 import { findAvailablePorts, runServe } from './commands/serve.js';
+import { buildReconstructionPrompt } from './reconstruction/prompt.js';
 import type { CaptureViewport } from './reconstruction/types.js';
 import { logger } from './utils/logger.js';
 
@@ -115,11 +116,13 @@ program
 
       if (!(options.serve as boolean)) {
         printCompletedJobs(jobs);
+        if (reconstruction) printReconstructionPrompts(jobs);
         return;
       }
 
       const ports = await findAvailablePorts(jobs.length, options.port as number);
       printServedJobs(jobs, ports);
+      if (reconstruction) printReconstructionPrompts(jobs);
       await Promise.all(jobs.map((job, index) => runServe({ outDir: job.outDir, port: ports[index]! })));
     } catch (err) {
       logger.error({ err: (err as Error).message, stack: (err as Error).stack }, 'export-failed');
@@ -195,4 +198,14 @@ function printServedJobs(jobs: ExportJob[], ports: number[]): void {
     process.stderr.write(`  ${job.name}: http://localhost:${ports[index]}  (${job.outDir})\n`);
   });
   process.stderr.write('\nPress Ctrl+C to stop all preview servers.\n\n');
+}
+
+function printReconstructionPrompts(jobs: ExportJob[]): void {
+  const plural = jobs.length === 1 ? '' : 's';
+  process.stderr.write(`Copy the following prompt${plural} into Codex from the target Next.js repository:\n`);
+  for (const job of jobs) {
+    const label = jobs.length === 1 ? '' : `\n${job.name}:\n`;
+    process.stderr.write(`${label}\n${buildReconstructionPrompt(job.outDir)}\n`);
+  }
+  process.stderr.write('\n');
 }

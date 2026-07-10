@@ -76,7 +76,7 @@ That single command:
 2. Crawls and extracts the site.
 3. Writes `./exports/antimetal-export/`.
 4. Starts its reference preview on the first available port at or above `3000`.
-5. Prints the exact output directory and preview URL.
+5. Prints the exact output directory, preview URL, and a copy-ready reconstruction prompt with the absolute export path filled in.
 
 Keep the command running while using the preview. Press `Ctrl+C` to stop the server.
 
