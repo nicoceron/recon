@@ -12,13 +12,13 @@
     "nocode",
     "cli"
   ],
-  "homepage": "https://github.com/nicoceron/framer-html-exporter#readme",
+  "homepage": "https://github.com/nicoceron/recon#readme",
   "bugs": {
-    "url": "https://github.com/nicoceron/framer-html-exporter/issues"
+    "url": "https://github.com/nicoceron/recon/issues"
   },
   "repository": {
     "type": "git",
-    "url": "git+https://github.com/nicoceron/framer-html-exporter.git"
+    "url": "git+https://github.com/nicoceron/recon.git"
   },
   "license": "MIT",
   "type": "module",

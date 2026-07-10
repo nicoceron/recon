@@ -34,7 +34,7 @@ The export can stay outside the new application repository as long as the coding
 
 ```text
 work/
-├── framer-html-exporter/
+├── recon/
 │   └── exports/example-export/       # local and gitignored
 └── example-next/                     # writable reconstruction repo
 ```
