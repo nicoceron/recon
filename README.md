@@ -1,4 +1,4 @@
-# framer-html-exporter
+# recon
 
 Extract one or more published sites into ground-truth reconstruction packages that another LLM can rebuild from zero in Next.js.
 
