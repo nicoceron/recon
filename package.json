@@ -1,11 +1,12 @@
 {
   "name": "framer-html-exporter",
   "version": "0.1.0",
-  "description": "Capture a published Framer page into one portable index.html file.",
+  "description": "Extract a published Framer site into an LLM-ready Next.js reconstruction package.",
   "keywords": [
     "framer",
     "html-export",
-    "single-html",
+    "nextjs-reconstruction",
+    "llm-handoff",
     "scraper",
     "playwright",
     "nocode",
@@ -28,13 +29,14 @@
     "dist",
     "src",
     "README.md",
+    "RECONSTRUCTION_AGENT.md",
     "LICENSE"
   ],
   "scripts": {
     "dev": "tsx src/cli.ts",
     "build": "tsc",
     "start": "node dist/cli.js",
-    "serve": "sirv output --port 3000 --single",
+    "serve": "tsx src/cli.ts serve",
     "typecheck": "tsc --noEmit",
     "test": "vitest run",
     "test:watch": "vitest",

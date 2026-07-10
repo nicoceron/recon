@@ -1,7 +1,7 @@
 import fs from 'node:fs';
 import path from 'node:path';
 import readline from 'node:readline';
-import { chromium, type BrowserContext } from 'playwright';
+import { chromium, type Browser, type BrowserContext } from 'playwright';
 import { logger } from '../utils/logger.js';
 
 export interface SessionOptions {
@@ -21,34 +21,52 @@ export interface OpenSession {
 
 export async function openSession(opts: SessionOptions): Promise<OpenSession> {
   const absDir = path.resolve(opts.userDataDir);
-  fs.mkdirSync(absDir, { recursive: true });
-
-  const isFirstRun = !hasExistingProfile(absDir);
-  const headless = opts.headed ? false : !isFirstRun;
   const viewportHeight = opts.viewportHeight ?? 900;
 
+  // Public extraction is always headless and ephemeral. This makes first-run
+  // behavior automatic and lets multiple sites run concurrently without
+  // Chromium profile-lock conflicts.
+  if (!opts.headed) {
+    logger.info({ headless: true, profile: 'ephemeral' }, 'launching-headless-browser');
+    const browser = await chromium.launch({
+      headless: true,
+      args: ['--disable-blink-features=AutomationControlled'],
+    });
+    const context = await browser.newContext({
+      viewport: { width: opts.viewportWidth, height: viewportHeight },
+    });
+    return browserSession(context, browser, false);
+  }
+
+  // Sign-in mode deliberately uses a persistent headed profile so cookies and
+  // authenticated sessions survive future --signin runs.
+  fs.mkdirSync(absDir, { recursive: true });
+  const isFirstRun = !hasExistingProfile(absDir);
+
   logger.info(
-    { userDataDir: absDir, headless, isFirstRun },
-    headless ? 'launching-headless-browser' : 'launching-headed-browser',
+    { userDataDir: absDir, headless: false, isFirstRun },
+    'launching-headed-browser-for-signin',
   );
 
   const context = await chromium.launchPersistentContext(absDir, {
-    headless,
-    viewport: headless ? { width: opts.viewportWidth, height: viewportHeight } : null,
+    headless: false,
+    viewport: null,
     args: ['--disable-blink-features=AutomationControlled'],
   });
 
-  if (isFirstRun || opts.headed) {
-    await ensureInitialPage(context, opts.initialUrl);
-    await waitForUserConfirmation();
-  }
+  await ensureInitialPage(context, opts.initialUrl);
+  await waitForUserConfirmation();
+  return browserSession(context, undefined, isFirstRun);
+}
 
+function browserSession(context: BrowserContext, browser: Browser | undefined, isFirstRun: boolean): OpenSession {
   return {
     context,
     isFirstRun,
     close: async () => {
       try {
-        await context.close();
+        if (browser) await browser.close();
+        else await context.close();
       } catch (err) {
         logger.warn({ err: (err as Error).message }, 'context-close-error');
       }
@@ -123,7 +141,7 @@ function waitForUserConfirmation(): Promise<void> {
   const stdinIsTty = Boolean((process.stdin as NodeJS.ReadStream).isTTY);
   const lines: string[] = [
     '',
-    '>> Use the opened browser to sign in if needed, then navigate to the page you want to export.',
+    '>> Sign in in the opened browser if needed, then navigate to the page you want to export.',
     '>> When the page is ready, do one of these:',
   ];
   if (stdinIsTty) lines.push('>>   (a) Press Enter in this terminal, or');

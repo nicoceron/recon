@@ -82,4 +82,38 @@ describe('collectUrlsFromText', () => {
     expect(store.has('https://framerusercontent.com/sites/site-id/entry.mjs')).toBe(true);
     expect(store.has('https://framerusercontent.com/sites/site-id/chunk.mjs')).toBe(true);
   });
+
+  it('tops up same-origin framework assets without treating page links as assets', async () => {
+    const store = new AssetStore();
+    const pages = new Map([
+      [
+        'https://example.com/',
+        '<script src="/_next/static/app.js"></script><img src="/_next/image?url=%2Fimages%2Fhero.jpg&w=1200&q=75"><a href="/pricing">Pricing</a>',
+      ],
+    ]);
+    const fetched: string[] = [];
+    const context = {
+      request: {
+        fetch: async (url: string) => {
+          fetched.push(url);
+          return {
+            status: () => 200,
+            body: async () => Buffer.from(url.endsWith('.js') ? 'export{}' : 'image'),
+            headers: () => ({
+              'content-type': url.endsWith('.js') ? 'text/javascript' : 'image/webp',
+            }),
+          };
+        },
+      },
+    } as unknown as BrowserContext;
+
+    const result = await topupAssets(context, pages, store);
+
+    expect(result).toMatchObject({ fetched: 2, failed: 0 });
+    expect(fetched).toEqual([
+      'https://example.com/_next/static/app.js',
+      'https://example.com/_next/image?url=%2Fimages%2Fhero.jpg&w=1200&q=75',
+    ]);
+    expect(fetched).not.toContain('https://example.com/pricing');
+  });
 });

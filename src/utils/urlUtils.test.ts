@@ -76,6 +76,24 @@ describe('assetLocalPath', () => {
       assetLocalPath('https://cdn.example.com/img.png?w=1024'),
     );
   });
+  it('keeps different Next.js optimizer source images separate while deduping widths', () => {
+    const heroSmall = assetLocalPath(
+      'https://example.com/_next/image?url=%2Fimages%2Fhero.jpg&w=640&q=75',
+      'image/webp',
+    );
+    const heroLarge = assetLocalPath(
+      'https://example.com/_next/image?url=%2Fimages%2Fhero.jpg&w=1920&q=75',
+      'image/webp',
+    );
+    const avatar = assetLocalPath(
+      'https://example.com/_next/image?url=%2Fimages%2Favatar.jpg&w=640&q=75',
+      'image/webp',
+    );
+
+    expect(heroSmall).toBe(heroLarge);
+    expect(heroSmall).not.toBe(avatar);
+    expect(heroSmall).toContain('image--hero-');
+  });
   it('appends extension from content-type when missing', () => {
     expect(assetLocalPath('https://cdn.example.com/img', 'image/webp')).toBe(
       'assets/cdn.example.com/img.webp',

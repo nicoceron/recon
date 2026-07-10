@@ -6,7 +6,8 @@ dist/
 /*-single/
 /*-output/
 /*-export/
-/exports/
+/exports/*
+!/exports/README.md
 /captures/
 /assets/
 *.html

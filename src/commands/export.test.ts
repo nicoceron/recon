@@ -1,6 +1,21 @@
 import { describe, expect, it } from 'vitest';
 import { AssetStore } from '../interceptor/assetInterceptor.js';
-import { prepareSingleHtml } from './export.js';
+import { chooseReplayPages, prepareSingleHtml } from './export.js';
+
+describe('chooseReplayPages', () => {
+  it('uses original server HTML for React/Next-style pages', () => {
+    const hydrated = new Map([['https://example.com/', '<html><body><canvas></canvas><script src="app.js"></script></body></html>']]);
+    const source = new Map([['https://example.com/', '<html><body><div id="root"></div><script src="app.js"></script></body></html>']]);
+    expect(chooseReplayPages(hydrated, source).get('https://example.com/')).toBe(source.get('https://example.com/'));
+  });
+
+  it('keeps hydrated DOM for Framer pages', () => {
+    const hydratedHtml = '<html><body><div data-framer-hydrate-v2>Hydrated Framer</div></body></html>';
+    const hydrated = new Map([['https://example.com/', hydratedHtml]]);
+    const source = new Map([['https://example.com/', '<html><body>SSR Framer</body></html>']]);
+    expect(chooseReplayPages(hydrated, source).get('https://example.com/')).toBe(hydratedHtml);
+  });
+});
 
 describe('prepareSingleHtml', () => {
   it('writes only the selected page and points uncaptured internal links at the real source page', async () => {
@@ -101,5 +116,40 @@ describe('prepareSingleHtml', () => {
 
     expect(result.html).not.toContain('data-static-captured-cssom="1"');
     expect(result.html).not.toContain('.hero{color:red}');
+  });
+
+  it('lets original Next.js source hydrate without generic static repair layers', async () => {
+    const pages = new Map([
+      ['https://example.com/', '<html><head></head><body><main>SSR</main><script>self.__next_f=self.__next_f||[];self.__next_f.push([1,"data"])</script></body></html>'],
+    ]);
+    const result = await prepareSingleHtml(pages, 'https://example.com', new AssetStore(), {
+      liveUrl: 'https://example.com/',
+      localizeAssets: false,
+      pageStyles: new Map([['https://example.com/', '.runtime-only{opacity:1}']]),
+    });
+    expect(result.html).not.toContain('data-static-captured-cssom="1"');
+    expect(result.html).not.toContain('.runtime-only{opacity:1}');
+    expect(result.html).not.toContain('[data-static-control]');
+    expect(result.html).not.toContain('var pageMap=');
+    expect(result.html).toContain('data-static-framework-visibility="1"');
+  });
+
+  it('keeps same-origin Next.js bootstrap paths at /_next when localized aliases exist', async () => {
+    const store = new AssetStore();
+    store.record('https://example.com/_next/static/app.js?build=1', Buffer.from('app'), 'text/javascript');
+    const pages = new Map([
+      [
+        'https://example.com/',
+        '<html><head><script src="/_next/static/app.js?build=1"></script></head><body><script>self.__next_f=[]</script></body></html>',
+      ],
+    ]);
+
+    const result = await prepareSingleHtml(pages, 'https://example.com', store, {
+      liveUrl: 'https://example.com/',
+      localizeAssets: true,
+    });
+
+    expect(result.html).toContain('src="/_next/static/app.js?build=1"');
+    expect(result.html).not.toContain('src="/assets/example.com/_next/static/app.js"');
   });
 });

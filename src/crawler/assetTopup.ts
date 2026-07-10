@@ -31,9 +31,15 @@ export async function topupAssets(
 ): Promise<{ fetched: number; skipped: number; failed: number }> {
   const candidates = new Set<string>();
   const scannedTextAssets = new Set<string>();
+  const pageOrigins = new Set<string>();
+
+  for (const pageUrl of pages.keys()) {
+    const parsed = tryParse(pageUrl);
+    if (parsed) pageOrigins.add(parsed.origin);
+  }
 
   for (const [pageUrl, html] of pages) {
-    collectAssetUrls(html, pageUrl, candidates);
+    collectAssetUrls(html, pageUrl, candidates, pageOrigins);
   }
 
   let fetched = 0;
@@ -49,11 +55,11 @@ export async function topupAssets(
   // leaves reachable modules unfetched.
   const batchSize = 8;
   for (;;) {
-    collectUrlsFromTextAssets(store, scannedTextAssets, candidates);
+    collectUrlsFromTextAssets(store, scannedTextAssets, candidates, pageOrigins);
 
     const missing: string[] = [];
     for (const url of candidates) {
-      if (!store.has(url) && !failedUrls.has(url) && shouldFetchHost(url)) {
+      if (!store.has(url) && !failedUrls.has(url) && shouldFetchHost(url, pageOrigins)) {
         missing.push(url);
       }
     }
@@ -103,7 +109,12 @@ export async function topupAssets(
   return { fetched, skipped, failed };
 }
 
-function collectUrlsFromTextAssets(store: AssetStore, scanned: Set<string>, candidates: Set<string>): void {
+function collectUrlsFromTextAssets(
+  store: AssetStore,
+  scanned: Set<string>,
+  candidates: Set<string>,
+  allowedOrigins: ReadonlySet<string>,
+): void {
   for (const rec of store.all()) {
     if (scanned.has(rec.localPath)) continue;
     const ct = rec.contentType.toLowerCase();
@@ -119,7 +130,7 @@ function collectUrlsFromTextAssets(store: AssetStore, scanned: Set<string>, cand
 
     scanned.add(rec.localPath);
     const text = rec.body.toString('utf8');
-    collectUrlsFromText(text, candidates, rec.url);
+    collectUrlsFromText(text, candidates, rec.url, allowedOrigins);
   }
 }
 
@@ -176,7 +187,12 @@ async function fetchFullFramerCmsFiles(context: BrowserContext, store: AssetStor
  * (JSON manifests, JS bundles, CSS). Catches asset references constructed at
  * runtime that aren't in any HTML attribute.
  */
-export function collectUrlsFromText(text: string, into: Set<string>, baseUrl?: string): void {
+export function collectUrlsFromText(
+  text: string,
+  into: Set<string>,
+  baseUrl?: string,
+  allowedOrigins: ReadonlySet<string> = new Set(),
+): void {
   // Match `https://[subdomain.]host/path` style absolute URLs.
   // The host part allows zero-or-more subdomains (so we match bare
   // `https://framerusercontent.com/...` as well as `https://x.framerusercontent.com/...`).
@@ -187,14 +203,14 @@ export function collectUrlsFromText(text: string, into: Set<string>, baseUrl?: s
     const raw = m[0]
       // Trim trailing punctuation that often follows URLs in JSON/JS
       .replace(/[.,;:!?'"`)\]}>]+$/g, '');
-    if (shouldFetchHost(raw)) into.add(raw);
+    if (shouldFetchHost(raw, allowedOrigins)) into.add(raw);
   }
 
   collectFramerCmsUrlsFromText(text, into);
 
   if (!baseUrl) return;
 
-  collectRelativeModuleSpecifiers(text, baseUrl, into);
+  collectRelativeModuleSpecifiers(text, baseUrl, into, allowedOrigins);
 }
 
 function collectFramerCmsUrlsFromText(text: string, into: Set<string>): void {
@@ -215,7 +231,12 @@ function collectFramerCmsUrlsFromText(text: string, into: Set<string>): void {
   }
 }
 
-function collectRelativeModuleSpecifiers(text: string, baseUrl: string, into: Set<string>): void {
+function collectRelativeModuleSpecifiers(
+  text: string,
+  baseUrl: string,
+  into: Set<string>,
+  allowedOrigins: ReadonlySet<string>,
+): void {
   const patterns = [
     /\bimport\s*\(\s*(["'`])([^"'`]+)\1\s*\)/g,
     /\bimport\s*(?:(?:[\w*{}\s,]+)\s*from\s*)?(["'`])([^"'`]+)\1/g,
@@ -227,20 +248,27 @@ function collectRelativeModuleSpecifiers(text: string, baseUrl: string, into: Se
       const specifier = match[2];
       if (!specifier?.startsWith('.')) continue;
       const absolute = tryParse(specifier, baseUrl)?.toString();
-      if (absolute && shouldFetchHost(absolute)) into.add(absolute);
+      if (absolute && shouldFetchHost(absolute, allowedOrigins)) into.add(absolute);
     }
   }
 }
 
-function collectAssetUrls(html: string, baseUrl: string, into: Set<string>): void {
+function collectAssetUrls(
+  html: string,
+  baseUrl: string,
+  into: Set<string>,
+  allowedOrigins: ReadonlySet<string>,
+): void {
   const $ = cheerio.load(html);
 
   for (const attr of ATTRS_TO_SCAN) {
     $(`[${attr}]`).each((_i, el) => {
+      const tag = 'tagName' in el ? el.tagName.toLowerCase() : '';
+      if (!isAssetAttribute(tag, attr)) return;
       const value = $(el).attr(attr);
       if (!value) return;
       const abs = tryParse(value, baseUrl)?.toString();
-      if (abs && shouldFetchHost(abs)) into.add(abs);
+      if (abs && shouldFetchHost(abs, allowedOrigins)) into.add(abs);
     });
   }
 
@@ -256,7 +284,7 @@ function collectAssetUrls(html: string, baseUrl: string, into: Set<string>): voi
       }
       for (const p of parts) {
         const abs = tryParse(p.url, baseUrl)?.toString();
-        if (abs && shouldFetchHost(abs)) into.add(abs);
+        if (abs && shouldFetchHost(abs, allowedOrigins)) into.add(abs);
       }
     });
   }
@@ -267,12 +295,18 @@ function collectAssetUrls(html: string, baseUrl: string, into: Set<string>): voi
     if (!value || !value.includes('url(')) return;
     for (const m of value.matchAll(/url\(\s*['"]?([^'")]+)['"]?\s*\)/g)) {
       const abs = tryParse(m[1]!, baseUrl)?.toString();
-      if (abs && shouldFetchHost(abs)) into.add(abs);
+      if (abs && shouldFetchHost(abs, allowedOrigins)) into.add(abs);
     }
   });
 }
 
-function shouldFetchHost(absoluteUrl: string): boolean {
+function isAssetAttribute(tag: string, attr: string): boolean {
+  if (attr === 'href') return tag === 'link' || tag === 'use';
+  if (attr === 'content') return tag === 'meta';
+  return ['img', 'source', 'video', 'audio', 'iframe', 'script', 'use', 'object', 'embed'].includes(tag);
+}
+
+function shouldFetchHost(absoluteUrl: string, allowedOrigins: ReadonlySet<string> = new Set()): boolean {
   const u = tryParse(absoluteUrl);
   if (!u) return false;
   if (u.protocol !== 'http:' && u.protocol !== 'https:') return false;
@@ -280,5 +314,5 @@ function shouldFetchHost(absoluteUrl: string): boolean {
   if (u.hostname.toLowerCase() === 'framer.com' || u.hostname.toLowerCase() === 'www.framer.com') {
     return u.pathname.startsWith('/m/');
   }
-  return ASSET_HOST_PATTERNS.some((re) => re.test(u.hostname));
+  return allowedOrigins.has(u.origin) || ASSET_HOST_PATTERNS.some((re) => re.test(u.hostname));
 }

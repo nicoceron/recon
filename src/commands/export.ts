@@ -7,13 +7,16 @@ import { applyForcedTheme, installForcedTheme, type ForcedTheme } from '../crawl
 import { topupAssets } from '../crawler/assetTopup.js';
 import { ensureCleanDir, writeFileEnsured } from '../output/fileWriter.js';
 import { writeManifest, type Manifest } from '../output/manifestWriter.js';
+import { captureReconstruction } from '../reconstruction/capture.js';
+import type { CaptureViewport } from '../reconstruction/types.js';
+import { writeReconstructionPackage } from '../reconstruction/writer.js';
 import { rewriteCss } from '../rewriter/cssRewriter.js';
 import { rewriteHtml, type StaticEventPreview, type StaticInteractionSnapshot } from '../rewriter/htmlRewriter.js';
 import { buildJsReplacements, rewriteJs } from '../rewriter/jsRewriter.js';
 import { editorToPreviewUrl, openSession, pickActivePageUrl } from '../session/browserSession.js';
 import { logger } from '../utils/logger.js';
 import { isTextual } from '../utils/mimeUtils.js';
-import { normalizePageUrl, pageLocalPath, rootRelativeAssetPath, sameOrigin } from '../utils/urlUtils.js';
+import { normalizePageUrl, pageLocalPath, rootRelativeAssetPath, sameOrigin, tryParse } from '../utils/urlUtils.js';
 
 const DEFAULT_MULTI_PAGE_MAX_DEPTH = 3;
 
@@ -41,10 +44,18 @@ export interface ExportCommandOptions {
   subscribeRedirect?: { url: string; text?: string };
   /** Force browser and static output theme. */
   forceTheme?: ForcedTheme;
+  /** Emit the structured, responsive LLM reconstruction package. Defaults to true. */
+  reconstruction?: boolean;
+  /** Responsive viewport matrix used by the reconstruction capture. */
+  reconstructionViewports?: CaptureViewport[];
 }
 
 export async function runExport(opts: ExportCommandOptions): Promise<void> {
   const outDir = path.resolve(opts.outDir);
+  const reconstructionEnabled = opts.reconstruction ?? true;
+  const effectiveMultiPage = Boolean(opts.multiPage || reconstructionEnabled);
+  const shouldLocalizeAssets = Boolean(opts.localizeAssets || reconstructionEnabled);
+  const effectiveStayLocal = Boolean(opts.stayLocal || reconstructionEnabled);
   await ensureCleanDir(outDir);
 
   const session = await openSession({
@@ -82,7 +93,7 @@ export async function runExport(opts: ExportCommandOptions): Promise<void> {
       startUrl: liveUrl,
       additionalUrls: opts.includeUrls,
       concurrency: 1,
-      maxDepth: opts.maxDepth ?? (opts.multiPage ? DEFAULT_MULTI_PAGE_MAX_DEPTH : 0),
+      maxDepth: opts.maxDepth ?? (effectiveMultiPage ? DEFAULT_MULTI_PAGE_MAX_DEPTH : 0),
       viewportWidth: opts.viewportWidth,
       viewportHeight: 900,
       scroll: opts.scroll,
@@ -92,49 +103,57 @@ export async function runExport(opts: ExportCommandOptions): Promise<void> {
     });
 
     logger.info({ pages: crawlResult.pages.size, assets: store.size() }, 'crawl-finished');
+    const replayPages = chooseReplayPages(crawlResult.pages, crawlResult.sourcePages);
+    const reconstructionCapture = reconstructionEnabled
+      ? await captureReconstruction(session.context, crawlResult.pages.keys(), {
+          viewports: opts.reconstructionViewports,
+          forceTheme: opts.forceTheme,
+          scroll: opts.scroll,
+          pageTimeoutMs: 60_000,
+        })
+      : undefined;
     const interactionSnapshots = await captureInteractionSnapshots(session.context, crawlResult.pages, crawlResult.origin, {
       viewportWidth: opts.viewportWidth,
       viewportHeight: 900,
       forceTheme: opts.forceTheme,
     });
 
-    const shouldLocalizeAssets = opts.localizeAssets;
     if (shouldLocalizeAssets) {
       logger.info('starting-topup');
       // Top-up phase: scan HTML for asset URLs the browser didn't fetch (srcset
       // variants for other viewports, favicons skipped in headless, etc.) and pull
       // them down explicitly so the exported site renders correctly at every breakpoint.
-      await topupAssets(session.context, crawlResult.pages, store);
+      await topupAssets(session.context, replayPages, store);
       logger.info({ assets: store.size() }, 'topup-finished-starting-rewrite');
     }
 
     if (shouldLocalizeAssets) {
       const hosts = collectHosts(store);
       const jsReplacements = buildJsReplacements(hosts, store.urlMap());
-      await writeAssets(outDir, store, true, hosts, jsReplacements);
+      await writeAssets(outDir, store, true, hosts, jsReplacements, crawlResult.origin);
     }
 
-    if (opts.multiPage) {
-      await writeHtmlPages(outDir, crawlResult.pages, crawlResult.origin, store, {
+    if (effectiveMultiPage) {
+      await writeHtmlPages(outDir, replayPages, crawlResult.origin, store, {
         liveUrl,
         localizeAssets: shouldLocalizeAssets,
         canonicalUrl: opts.canonicalUrl,
         stripSelectors: opts.stripSelectors,
         subscribeRedirect: opts.subscribeRedirect,
-        stayLocal: opts.stayLocal ?? true,
+        stayLocal: effectiveStayLocal,
         multiPage: true,
         interactionSnapshots,
         pageStyles: crawlResult.pageStyles,
         forceTheme: opts.forceTheme,
       });
     } else {
-      await writeSingleHtml(outDir, crawlResult.pages, crawlResult.origin, store, {
+      await writeSingleHtml(outDir, replayPages, crawlResult.origin, store, {
         liveUrl,
         localizeAssets: shouldLocalizeAssets,
         canonicalUrl: opts.canonicalUrl,
         stripSelectors: opts.stripSelectors,
         subscribeRedirect: opts.subscribeRedirect,
-        stayLocal: opts.stayLocal,
+        stayLocal: effectiveStayLocal,
         interactionSnapshots,
         pageStyles: crawlResult.pageStyles,
         forceTheme: opts.forceTheme,
@@ -164,9 +183,22 @@ export default createEditorBar;
 
     const manifest = buildManifest(liveUrl, crawlResult.origin, crawlResult.pages, store, {
       includeAssets: shouldLocalizeAssets,
-      multiPage: opts.multiPage,
+      multiPage: effectiveMultiPage,
     });
     await writeManifest(outDir, manifest);
+
+    if (reconstructionCapture) {
+      await writeReconstructionPackage(outDir, {
+        sourceUrl: liveUrl,
+        origin: crawlResult.origin,
+        capture: reconstructionCapture,
+        rawPages: crawlResult.pages,
+        sourcePages: crawlResult.sourcePages,
+        pageStyles: crawlResult.pageStyles,
+        store,
+        openStateSnapshots: interactionSnapshots,
+      });
+    }
 
     logger.info(
       { pages: manifest.totals.pages, assets: manifest.totals.assets, bytes: manifest.totals.assetBytes },
@@ -174,7 +206,10 @@ export default createEditorBar;
     );
     process.stderr.write(
       `\nDone. ${manifest.totals.pages} page(s), ${manifest.totals.assets} asset(s) saved to ${outDir}\n` +
-        `Run:  npm run serve   (or:  framer-html-exporter serve)   then open http://localhost:3000\n\n`,
+        (reconstructionCapture
+          ? `LLM entry point: ${path.join(outDir, 'LLM_HANDOFF.md')} (share the entire export directory)\n`
+          : '') +
+        '\n',
     );
   } finally {
     await session.close();
@@ -918,6 +953,7 @@ async function writeAssets(
   rewrite: boolean,
   _hosts: Set<string>,
   jsReplacements: ReturnType<typeof buildJsReplacements> = [],
+  siteOrigin?: string,
 ): Promise<void> {
   const assetLookup = (originalUrl: string): string | undefined => {
     const rec = store.lookup(originalUrl);
@@ -926,7 +962,7 @@ async function writeAssets(
 
   for (const rec of store.all()) {
     if (!rewrite || rec.localPath.endsWith('.framercms') || !isTextual(rec.contentType)) {
-      await writeFileEnsured(outDir, rec.localPath, rec.body);
+      await writeAssetAndSameOriginAlias(outDir, rec.url, rec.localPath, rec.body, siteOrigin);
       continue;
     }
 
@@ -948,8 +984,28 @@ async function writeAssets(
     }
     // JSON / plain text: leave alone
 
-    await writeFileEnsured(outDir, rec.localPath, text);
+    await writeAssetAndSameOriginAlias(outDir, rec.url, rec.localPath, text, siteOrigin);
   }
+}
+
+async function writeAssetAndSameOriginAlias(
+  outDir: string,
+  assetUrl: string,
+  localPath: string,
+  body: string | Buffer,
+  siteOrigin?: string,
+): Promise<void> {
+  await writeFileEnsured(outDir, localPath, body);
+  if (!siteOrigin || !sameOrigin(assetUrl, siteOrigin)) return;
+
+  const parsed = tryParse(assetUrl);
+  if (!parsed || parsed.searchParams.has('url') || parsed.searchParams.has('src')) return;
+  const hostPrefix = `assets/${parsed.hostname.toLowerCase()}/`;
+  const normalized = localPath.replace(/\\/g, '/');
+  if (!normalized.startsWith(hostPrefix)) return;
+  const aliasPath = normalized.slice(hostPrefix.length);
+  if (!aliasPath || aliasPath === 'index.html') return;
+  await writeFileEnsured(outDir, aliasPath, body);
 }
 
 interface SingleHtmlOptions {
@@ -995,10 +1051,15 @@ async function prepareHtmlPage(
   runtimeEventPreviewMap: Record<string, StaticEventPreview>,
 ): Promise<{ url: string; html: string }> {
   const isFramerDocument = detectFramerDocument(html);
+  const isFrameworkSource = detectFrameworkSourceDocument(html);
 
   const assetLookup = (originalUrl: string): string | undefined => {
     if (!opts.localizeAssets) return undefined;
     const rec = store.lookup(originalUrl);
+    if (rec && isFrameworkSource && sameOrigin(originalUrl, origin)) {
+      const parsed = tryParse(originalUrl);
+      if (parsed?.pathname.startsWith('/_next/static/')) return `${parsed.pathname}${parsed.search}`;
+    }
     return rec?.rootRelativePath;
   };
   const assetFallback = (absoluteUrl: string): string | undefined => {
@@ -1023,11 +1084,13 @@ async function prepareHtmlPage(
     pageLookup,
     pageFallback,
     preserveFramerHydrationTargets: isFramerDocument,
-    staticRuntimeFixes: !isFramerDocument,
+    staticRuntimeFixes: !isFramerDocument && !isFrameworkSource,
     runtimePageMap,
     runtimeEventPreviewMap,
     runtimeInteractionSnapshotMap: opts.interactionSnapshots,
-    capturedPageCss: isFramerDocument ? undefined : opts.pageStyles?.get(url),
+    injectRuntimePageLinkRewriter: !isFrameworkSource,
+    frameworkVisibilityFallback: isFrameworkSource,
+    capturedPageCss: isFramerDocument || isFrameworkSource ? undefined : opts.pageStyles?.get(url),
     forceTheme: opts.forceTheme,
     stayLocal: opts.stayLocal,
     canonicalUrl: opts.canonicalUrl,
@@ -1221,6 +1284,39 @@ function detectFramerDocument(html: string): boolean {
     html.includes('data-framer-bundle=') ||
     html.includes('type="framer/appear"')
   );
+}
+
+function detectFrameworkSourceDocument(html: string): boolean {
+  return (
+    html.includes('self.__next_f.push') ||
+    /<script\b[^>]*\bid=["']__NEXT_DATA__["']/i.test(html) ||
+    /<script\b[^>]*\bsrc=["'][^"']*(?:\/_next\/|\/assets\/index-)/i.test(html)
+  );
+}
+
+/**
+ * Framer is replayed from its hydrated DOM because its appear/variant runtime
+ * expects those resolved nodes. Other frameworks must start from the original
+ * server response: replaying post-hydration React/Next HTML executes the app a
+ * second time and duplicates canvases, scripts, and client components.
+ */
+export function chooseReplayPages(
+  hydratedPages: Map<string, string>,
+  sourcePages: Map<string, string>,
+): Map<string, string> {
+  const replay = new Map<string, string>();
+  let sourceCount = 0;
+  for (const [url, hydrated] of hydratedPages) {
+    const source = sourcePages.get(url);
+    if (source?.trim() && !detectFramerDocument(hydrated) && !detectFramerDocument(source)) {
+      replay.set(url, source);
+      sourceCount += 1;
+    } else {
+      replay.set(url, hydrated);
+    }
+  }
+  logger.info({ sourceResponses: sourceCount, hydrated: replay.size - sourceCount }, 'replay-html-selected');
+  return replay;
 }
 
 function buildManifest(

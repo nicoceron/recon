@@ -52,6 +52,10 @@ export interface HtmlRewriteContext {
   runtimeEventPreviewMap?: Record<string, StaticEventPreview>;
   /** Captured opened UI states keyed by local href or slug. */
   runtimeInteractionSnapshotMap?: Record<string, StaticInteractionSnapshot>;
+  /** Disable the generic client-side route mapper when the original framework owns routing/hydration. */
+  injectRuntimePageLinkRewriter?: boolean;
+  /** Reveal SSR content if a framework's client animation bootstrap never runs. */
+  frameworkVisibilityFallback?: boolean;
   /** Accessible page-level CSSOM captured from the browser after hydration. */
   capturedPageCss?: string;
   /** Force the static output to keep this theme instead of following local system preference. */
@@ -272,7 +276,8 @@ export async function rewriteHtml(html: string, ctx: HtmlRewriteContext): Promis
   }
 
   const shouldInjectPageLinkRuntime =
-    ctx.staticRuntimeFixes || ctx.stayLocal || Object.keys(ctx.runtimePageMap ?? {}).length > 0;
+    ctx.injectRuntimePageLinkRewriter ??
+    (ctx.staticRuntimeFixes || ctx.stayLocal || Object.keys(ctx.runtimePageMap ?? {}).length > 0);
   if (shouldInjectPageLinkRuntime) {
     $('head').prepend(
       `<script>${buildRuntimePageLinkRewriter(ctx.runtimePageMap ?? {}, ctx.siteOrigin, Boolean(ctx.stayLocal), ctx.runtimeEventPreviewMap ?? {}, ctx.runtimeInteractionSnapshotMap ?? {})}</script>`,
@@ -288,7 +293,20 @@ export async function rewriteHtml(html: string, ctx: HtmlRewriteContext): Promis
     $('body').append(`<script>${buildStaticRuntimeFixes(Boolean(ctx.stayLocal))}</script>`);
   }
 
+  if (ctx.frameworkVisibilityFallback) {
+    $('body').append(`<script data-static-framework-visibility="1">${buildFrameworkVisibilityFallback()}</script>`);
+  }
+
   return $.html();
+}
+
+function buildFrameworkVisibilityFallback(): string {
+  return `(function(){
+function hiddenRevealTargets(){return Array.from(document.querySelectorAll('[style]')).filter(function(el){var s=el.getAttribute('style')||'';return /opacity\s*:\s*0(?:[;\s]|$)/i.test(s)&&/translate3d\(\s*0(?:px)?\s*,\s*12px\s*,\s*0(?:px)?\s*\)/i.test(s);});}
+function reveal(el){el.style.opacity='1';el.style.transform='translate3d(0,0,0)';}
+function arm(){var targets=hiddenRevealTargets();if(!('IntersectionObserver' in window)){targets.forEach(reveal);return;}var observer=new IntersectionObserver(function(entries){entries.forEach(function(entry){if(entry.isIntersecting){reveal(entry.target);observer.unobserve(entry.target);}});},{rootMargin:'80px 0px'});targets.forEach(function(el){observer.observe(el);});}
+if(document.readyState==='loading')document.addEventListener('DOMContentLoaded',arm,{once:true});else arm();
+})();`;
 }
 
 function styleSafeCss(css: string): string {

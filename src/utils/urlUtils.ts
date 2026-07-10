@@ -54,12 +54,12 @@ export function assetKey(input: string): string {
 
 /**
  * Convert a Framer asset URL to a local path under output/assets/.
- * Uses the canonical (query-less) origin + pathname so that any query-string
- * variant of the same asset (e.g. `?width=512` vs `?width=1024`) maps to the
- * SAME file. The static server (sirv) ignores query strings, so this guarantees
- * runtime-constructed asset URLs resolve regardless of which variant the JS asks
- * for. AssetStore.record() handles keeping the largest variant when multiple
- * sizes of the same image are captured.
+ * Uses the canonical origin + pathname so ordinary transform variants (for
+ * example `?width=512` vs `?width=1024`) map to the same file. Optimizer
+ * endpoints such as Next.js `/_next/image?url=/images/hero.jpg&w=1200` are a
+ * special case: the `url`/`src` parameter identifies a different underlying
+ * asset, so it becomes part of the filename while dimensions remain ignored.
+ * AssetStore.record() then keeps the largest captured size of each real image.
  */
 export function assetLocalPath(input: string, contentType?: string): string {
   const u = tryParse(input);
@@ -69,12 +69,32 @@ export function assetLocalPath(input: string, contentType?: string): string {
   const segments = rawPath.split('/').map(sanitizeSegment).filter(Boolean);
   let basename = segments.pop() ?? 'index';
 
+  const semanticIdentity = u.searchParams.get('url') ?? u.searchParams.get('src');
+  if (semanticIdentity) {
+    const decodedIdentity = safeDecodeURIComponent(semanticIdentity);
+    const identityUrl = tryParse(decodedIdentity, u.origin);
+    const identityPath = identityUrl?.pathname ?? decodedIdentity;
+    const identityBase =
+      sanitizeSegment(path.posix.basename(identityPath) || 'asset')
+        .replace(/\.[a-z0-9]{1,8}$/i, '')
+        .slice(0, 48) || 'asset';
+    basename = `${basename}--${identityBase}-${sha8(decodedIdentity)}`;
+  }
+
   const ext = extensionFromContentType(contentType);
   if (ext && shouldAppendContentTypeExtension(basename, ext)) {
     basename = `${basename}.${ext}`;
   }
 
   return path.posix.join('assets', host, ...segments, basename);
+}
+
+function safeDecodeURIComponent(value: string): string {
+  try {
+    return decodeURIComponent(value);
+  } catch {
+    return value;
+  }
 }
 
 function shouldAppendContentTypeExtension(basename: string, contentExt: string): boolean {

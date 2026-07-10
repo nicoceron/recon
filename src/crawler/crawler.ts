@@ -6,6 +6,7 @@ import { normalizePageUrl, sameOrigin } from '../utils/urlUtils.js';
 import { extractInternalLinks } from './linkExtractor.js';
 import { inlineGoogleMapIframes } from './mapCapture.js';
 import { applyForcedTheme, installForcedTheme, type ForcedTheme } from './themeCapture.js';
+import { discoverSitemapPageUrls } from './sitemapDiscovery.js';
 
 export interface CrawlOptions {
   startUrl: string;
@@ -32,6 +33,8 @@ export interface CrawlResult {
   pages: Map<string, string>;
   /** Map<normalized page URL, accessible CSSOM captured after hydration/scroll> */
   pageStyles: Map<string, string>;
+  /** Map<normalized page URL, original server response HTML before hydration> */
+  sourcePages: Map<string, string>;
   /** Origin (scheme://host) of the start URL */
   origin: string;
 }
@@ -62,6 +65,7 @@ export async function crawlSite(context: BrowserContext, opts: CrawlOptions): Pr
 
   const pages = new Map<string, string>();
   const pageStyles = new Map<string, string>();
+  const sourcePages = new Map<string, string>();
   const visited = new Set<string>([startNormalized]);
   const queue: Array<{ url: string; depth: number }> = [{ url: startNormalized, depth: 0 }];
   for (const additionalUrl of opts.additionalUrls ?? []) {
@@ -69,6 +73,14 @@ export async function crawlSite(context: BrowserContext, opts: CrawlOptions): Pr
     if (!normalized || !inScope(normalized) || visited.has(normalized)) continue;
     visited.add(normalized);
     queue.push({ url: normalized, depth: 1 });
+  }
+  if (opts.maxDepth !== 0) {
+    const sitemapUrls = await discoverSitemapPageUrls(context, startNormalized);
+    for (const sitemapUrl of sitemapUrls) {
+      if (!inScope(sitemapUrl) || visited.has(sitemapUrl)) continue;
+      visited.add(sitemapUrl);
+      queue.push({ url: sitemapUrl, depth: 1 });
+    }
   }
   const pQueue = new PQueue({ concurrency: opts.concurrency });
 
@@ -83,6 +95,7 @@ export async function crawlSite(context: BrowserContext, opts: CrawlOptions): Pr
           try {
             const captured = await crawlOnePage(context, next.url, opts);
             pages.set(next.url, captured.html);
+            if (captured.sourceHtml?.trim()) sourcePages.set(next.url, captured.sourceHtml);
             if (captured.styles?.trim()) pageStyles.set(next.url, captured.styles);
             if (opts.maxDepth < 0 || next.depth < opts.maxDepth) {
               const links = extractInternalLinks(captured.html, next.url);
@@ -107,20 +120,21 @@ export async function crawlSite(context: BrowserContext, opts: CrawlOptions): Pr
   await pQueue.onIdle();
 
   logger.info({ pages: pages.size, visited: visited.size, origin }, 'crawl-complete');
-  return { pages, pageStyles, origin };
+  return { pages, pageStyles, sourcePages, origin };
 }
 
 async function crawlOnePage(
   context: BrowserContext,
   url: string,
   opts: CrawlOptions,
-): Promise<{ html: string; styles?: string }> {
+): Promise<{ html: string; sourceHtml?: string; styles?: string }> {
   const page = await context.newPage();
   await page.setViewportSize({ width: opts.viewportWidth, height: opts.viewportHeight });
   await installForcedTheme(page, opts.forceTheme);
   try {
     logger.info({ url }, 'crawling-page');
-    await page.goto(url, { waitUntil: 'domcontentloaded', timeout: opts.pageTimeoutMs });
+    const response = await page.goto(url, { waitUntil: 'domcontentloaded', timeout: opts.pageTimeoutMs });
+    const sourceHtml = await response?.text().catch(() => undefined);
 
     try {
       await page.waitForLoadState('networkidle', { timeout: 30_000 });
@@ -141,7 +155,7 @@ async function crawlOnePage(
     await sleep(200);
 
     const styles = await collectAccessibleCss(page);
-    return { html: await page.content(), styles };
+    return { html: await page.content(), sourceHtml, styles };
   } finally {
     await page.close().catch(() => undefined);
   }
