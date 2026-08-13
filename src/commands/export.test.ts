@@ -15,6 +15,20 @@ describe('chooseReplayPages', () => {
     const source = new Map([['https://example.com/', '<html><body>SSR Framer</body></html>']]);
     expect(chooseReplayPages(hydrated, source).get('https://example.com/')).toBe(hydratedHtml);
   });
+
+  it('keeps hydrated DOM when a static snapshot needs client-rendered content', () => {
+    const url = 'https://web.archive.org/web/20260804095252/https://factory.ai/';
+    const hydratedHtml = '<html><body><div id="module-platform"><h2>One platform, every surface</h2></div></body></html>';
+    const sourceHtml = '<html><body><div id="module-platform"><div style="min-height:900px"></div></div></body></html>';
+
+    const replay = chooseReplayPages(
+      new Map([[url, hydratedHtml]]),
+      new Map([[url, sourceHtml]]),
+      { preferHydrated: true },
+    );
+
+    expect(replay.get(url)).toBe(hydratedHtml);
+  });
 });
 
 describe('prepareSingleHtml', () => {
@@ -151,5 +165,37 @@ describe('prepareSingleHtml', () => {
 
     expect(result.html).toContain('src="/_next/static/app.js?build=1"');
     expect(result.html).not.toContain('src="/assets/example.com/_next/static/app.js"');
+  });
+
+  it('freezes a hydrated Wayback page without replaying archive or Next.js runtimes', async () => {
+    const url = 'https://web.archive.org/web/20260804095252/https://factory.ai/';
+    const pages = new Map([[url, `<!doctype html><html><head>
+      <link rel="stylesheet" href="https://web-static.archive.org/_static/css/banner-styles.css">
+      <script src="https://web-static.archive.org/_static/js/wombat.js"></script>
+      <script>self.__next_f=self.__next_f||[]</script>
+      <script type="application/ld+json">{"name":"Factory"}</script>
+    </head><body>
+      <div id="wm-ipp-base">Wayback toolbar</div>
+      <main><section id="module-platform"><h2 class="invisible">One platform, every surface</h2></section></main>
+      <div id="wm-ipp-print">Wayback print chrome</div>
+    </body></html>`]]);
+
+    const result = await prepareSingleHtml(pages, 'https://web.archive.org', new AssetStore(), {
+      liveUrl: url,
+      localizeAssets: false,
+      staticSnapshot: true,
+      pageStyles: new Map([[url, '.module-card{color:red}']]),
+    });
+
+    expect(result.html).toContain('One platform, every surface');
+    expect(result.html).toContain('type="application/ld+json"');
+    expect(result.html).toContain('data-static-captured-cssom="1"');
+    expect(result.html).toContain('.module-card{color:red}');
+    expect(result.html).toContain('.invisible{visibility:visible!important;opacity:1!important}');
+    expect(result.html).not.toContain('id="wm-ipp-base"');
+    expect(result.html).not.toContain('id="wm-ipp-print"');
+    expect(result.html).not.toContain('wombat.js');
+    expect(result.html).not.toContain('self.__next_f');
+    expect(result.html).not.toContain('banner-styles.css');
   });
 });

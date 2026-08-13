@@ -4,7 +4,6 @@ import path from 'node:path';
 import { buildExportJobs, runConcurrently, type ExportJob } from './commands/batchExport.js';
 import { runExport } from './commands/export.js';
 import { findAvailablePorts, runServe } from './commands/serve.js';
-import { buildReconstructionPrompt } from './reconstruction/prompt.js';
 import type { CaptureViewport } from './reconstruction/types.js';
 import { logger } from './utils/logger.js';
 
@@ -12,12 +11,12 @@ const program = new Command();
 
 program
   .name('framer-html-exporter')
-  .description('Extract a published Framer site into an LLM-ready Next.js reconstruction package.')
+  .description('Extract a published Framer page into standalone HTML plus an Astro migration tracker CSV.')
   .version('0.1.0');
 
 program
   .command('export')
-  .description('Extract responsive layout, assets, fonts, animations, interactions, DOM, CSS, and reference screenshots.')
+  .description('Extract a page into standalone.html and ASTRO_MIGRATION_TRACKER.csv by default.')
   .argument('<urls...>', 'One or more public URLs; multiple sites export concurrently')
   .option('-o, --out <dir>', 'Single-site output directory, or multi-site parent directory', './exports')
   .option('--signin', 'Open a persistent browser for a private/authenticated page', false)
@@ -30,14 +29,17 @@ program
   .option('--localize-assets', 'Download and rewrite assets for offline/self-hosted use', false)
   .option('--multi-page', 'Write every crawled page to its own local HTML file', false)
   .option('--full-site', 'Framer full-site preset: --localize-assets --multi-page --stay-local', false)
-  .option('--no-reconstruction', 'Skip the LLM reconstruction package and create only the legacy static mirror')
+  .option('--no-reconstruction', 'Use the legacy static mirror output with assets, manifest, and optional multiple HTML pages')
   .option(
     '--viewports <list>',
     'Responsive evidence matrix, e.g. desktop:1440x900,tablet:810x1080,mobile:390x844',
     parseViewports,
   )
-  .option('--max-depth <n>', 'Same-origin crawl depth; defaults to 3 in reconstruction mode', (v) => parseInt(v, 10))
+  .option('--no-adaptive-viewports', 'Capture only the requested viewport matrix without breakpoint-adjacent probes')
+  .option('--max-depth <n>', 'Override same-origin crawl depth; reconstruction defaults to 3, use 0 for one page', (v) => parseInt(v, 10))
   .option('--force-theme <theme>', 'Force captured page theme: light or dark')
+  .option('--framer-project <url>', 'Authorized Framer editor project URL to enrich the browser capture with official project data')
+  .option('--framer-api-key-env <name>', 'Environment variable containing the Framer API key', 'FRAMER_API_KEY')
   .option(
     '--include-url <url>',
     'Additional same-origin URL to capture; repeatable',
@@ -64,6 +66,13 @@ program
       const forceTheme = parseForceTheme(options.forceTheme);
       const fullSite = options.fullSite as boolean;
       const reconstruction = options.reconstruction as boolean;
+      const framerProjectUrl = options.framerProject as string | undefined;
+      const framerApiKeyEnv = options.framerApiKeyEnv as string;
+      if (framerProjectUrl && !reconstruction) throw new Error('--framer-project is available only in reconstruction mode.');
+      const framerApiKey = framerProjectUrl ? process.env[framerApiKeyEnv] : undefined;
+      if (framerProjectUrl && !framerApiKey) {
+        throw new Error(`--framer-project requires an API key in the ${framerApiKeyEnv} environment variable.`);
+      }
       const signin = Boolean(options.signin || options.headed);
       if (signin && urls.length > 1) {
         throw new Error('--signin accepts one URL per command because it requires interactive browser confirmation.');
@@ -82,13 +91,16 @@ program
           headed: signin,
           scroll: options.scroll as boolean,
           viewportWidth: options.viewportWidth as number,
-          localizeAssets: (options.localizeAssets as boolean) || fullSite || reconstruction,
-          multiPage: (options.multiPage as boolean) || fullSite || reconstruction,
+          localizeAssets: (options.localizeAssets as boolean) || fullSite,
+          multiPage: (options.multiPage as boolean) || fullSite,
           maxDepth: options.maxDepth as number | undefined,
           includeUrls: options.includeUrl as string[] | undefined,
           forceTheme,
           reconstruction,
           reconstructionViewports: options.viewports as CaptureViewport[] | undefined,
+          adaptiveViewports: options.adaptiveViewports as boolean,
+          framerProjectUrl,
+          framerApiKey,
           stayLocal: (options.stayLocal as boolean) || fullSite,
           userDataDir: path.resolve(options.userDataDir as string),
           canonicalUrl: options.canonicalUrl as string | undefined,
@@ -109,6 +121,7 @@ program
             name: failure.job.name,
             url: failure.job.url,
             err: failure.error instanceof Error ? failure.error.message : String(failure.error),
+            stack: failure.error instanceof Error ? failure.error.stack : undefined,
           }, 'site-export-failed');
         }
         throw new Error(`${failures.length} of ${jobs.length} site exports failed.`);
@@ -116,13 +129,11 @@ program
 
       if (!(options.serve as boolean)) {
         printCompletedJobs(jobs);
-        if (reconstruction) printReconstructionPrompts(jobs);
         return;
       }
 
       const ports = await findAvailablePorts(jobs.length, options.port as number);
-      printServedJobs(jobs, ports);
-      if (reconstruction) printReconstructionPrompts(jobs);
+      printServedJobs(jobs, ports, reconstruction);
       await Promise.all(jobs.map((job, index) => runServe({ outDir: job.outDir, port: ports[index]! })));
     } catch (err) {
       logger.error({ err: (err as Error).message, stack: (err as Error).stack }, 'export-failed');
@@ -192,20 +203,11 @@ function printCompletedJobs(jobs: ExportJob[]): void {
   process.stderr.write('\n');
 }
 
-function printServedJobs(jobs: ExportJob[], ports: number[]): void {
+function printServedJobs(jobs: ExportJob[], ports: number[], reconstruction: boolean): void {
   process.stderr.write('\nExports complete and previews are ready:\n');
   jobs.forEach((job, index) => {
-    process.stderr.write(`  ${job.name}: http://localhost:${ports[index]}  (${job.outDir})\n`);
+    const entry = reconstruction ? '/standalone.html' : '/';
+    process.stderr.write(`  ${job.name}: http://localhost:${ports[index]}${entry}  (${job.outDir})\n`);
   });
   process.stderr.write('\nPress Ctrl+C to stop all preview servers.\n\n');
-}
-
-function printReconstructionPrompts(jobs: ExportJob[]): void {
-  const plural = jobs.length === 1 ? '' : 's';
-  process.stderr.write(`Copy the following prompt${plural} into Codex from the target Next.js repository:\n`);
-  for (const job of jobs) {
-    const label = jobs.length === 1 ? '' : `\n${job.name}:\n`;
-    process.stderr.write(`${label}\n${buildReconstructionPrompt(job.outDir)}\n`);
-  }
-  process.stderr.write('\n');
 }

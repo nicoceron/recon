@@ -2,6 +2,10 @@ export interface CaptureViewport {
   name: string;
   width: number;
   height: number;
+  /** Why this width is part of the verification matrix. */
+  source?: 'required' | 'user' | 'breakpoint-below' | 'breakpoint' | 'breakpoint-above' | 'coverage';
+  /** Core viewports receive the full scroll and interaction-state pass. */
+  core?: boolean;
 }
 
 export interface RectEvidence {
@@ -26,6 +30,9 @@ export interface NodeEvidence {
   path: string;
   tag: string;
   role?: string;
+  accessibleName?: string;
+  focusable?: boolean;
+  tabIndex?: number;
   directText?: string;
   textContent?: string;
   attributes: Record<string, string>;
@@ -58,8 +65,46 @@ export interface InteractionEvidence {
   inputType?: string;
   ariaHasPopup?: string;
   ariaExpanded?: string;
+  ariaPressed?: string;
+  ariaSelected?: string;
   hover?: InteractionStateChange[];
   focus?: InteractionStateChange[];
+  activation?: {
+    attempted: boolean;
+    outcome: 'changed' | 'no-observable-change' | 'skipped-unsafe' | 'failed';
+    changes?: InteractionStateChange[];
+    screenshotLabel?: string;
+    error?: string;
+  };
+}
+
+export interface RuntimeDiagnostic {
+  kind: 'console' | 'page-error' | 'request-failed' | 'capture-warning';
+  level?: string;
+  message: string;
+  url?: string;
+}
+
+export interface NetworkEvidence {
+  url: string;
+  method: string;
+  resourceType: string;
+  status?: number;
+  contentType?: string;
+  fromServiceWorker?: boolean;
+  failure?: string;
+}
+
+export interface AccessibilityNodeEvidence {
+  nodeId: string;
+  ignored?: boolean;
+  role?: string;
+  name?: string;
+  description?: string;
+  value?: string;
+  properties?: Record<string, unknown>;
+  childIds?: string[];
+  backendDOMNodeId?: number;
 }
 
 export interface AnimationEvidence {
@@ -100,6 +145,9 @@ export interface ViewportEvidence {
   nodes: NodeEvidence[];
   interactions: InteractionEvidence[];
   animations: AnimationEvidence[];
+  accessibilityTree?: AccessibilityNodeEvidence[];
+  network: NetworkEvidence[];
+  diagnostics: RuntimeDiagnostic[];
 }
 
 export interface CapturedViewportEvidence extends ViewportEvidence {
@@ -109,6 +157,8 @@ export interface CapturedViewportEvidence extends ViewportEvidence {
     scrollY: number;
     path: string;
     screenshot: Buffer;
+    kind?: 'initial' | 'scroll' | 'interaction';
+    target?: string;
   }>;
 }
 
@@ -131,6 +181,37 @@ export interface ReconstructionCapture {
   capturedAt: string;
   viewports: CaptureViewport[];
   pages: PageReconstructionEvidence[];
+  coverage: {
+    requestedRoutes: string[];
+    capturedRoutes: string[];
+    failedRoutes: Array<{ url: string; reason: string }>;
+    discoveryFailures: Array<{ url: string; reason: string }>;
+    requestedViewports: CaptureViewport[];
+    discoveredBreakpoints: number[];
+    capturedViewportCount: number;
+    failedViewports: Array<{ url: string; viewport: CaptureViewport; reason: string }>;
+    interactionCandidates: number;
+    interactionStatesCaptured: number;
+    assetsCaptured: number;
+    assetBytes: number;
+    /** Unique body totals after content-hash deduplication in the evidence capsule. */
+    uniqueAssetBlobs?: number;
+    uniqueAssetBytes?: number;
+    assetIssues: Array<{ url: string; reason: string; detail?: string }>;
+    /** Referenced resources missing or unreachable on the live source. */
+    assetWarnings?: Array<{ url: string; reason: string; detail?: string }>;
+    /** Intentionally omitted owner/auth responses. These are policy decisions, not failures. */
+    assetExclusions?: Array<{ url: string; reason: string; detail?: string }>;
+  };
+  environment: {
+    browser: string;
+    userAgent: string;
+    platform: string;
+    locale: string;
+    timezone: string;
+    colorScheme?: string;
+    reducedMotion: string;
+  };
 }
 
 export interface ReconstructionAsset {

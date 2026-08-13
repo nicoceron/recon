@@ -1,12 +1,12 @@
 {
   "name": "framer-html-exporter",
   "version": "0.1.0",
-  "description": "Extract a published Framer site into an LLM-ready Next.js reconstruction package.",
+  "description": "Extract a published Framer page into standalone HTML and an Astro migration tracker.",
   "keywords": [
     "framer",
     "html-export",
-    "nextjs-reconstruction",
-    "llm-handoff",
+    "astro-reconstruction",
+    "migration-tracker",
     "scraper",
     "playwright",
     "nocode",
@@ -68,5 +68,8 @@
     "tsx": "^4.19.1",
     "typescript": "^5.6.2",
     "vitest": "^3.2.4"
+  },
+  "optionalDependencies": {
+    "framer-api": "^0.1.29"
   }
 }

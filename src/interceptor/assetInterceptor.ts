@@ -11,6 +11,28 @@ export interface AssetRecord {
   rootRelativePath: string;
 }
 
+export interface AssetCaptureIssue {
+  url: string;
+  reason:
+    | 'too-large'
+    | 'body-read-failed'
+    | 'privacy-excluded'
+    | 'fetch-failed'
+    | 'source-missing'
+    | 'source-unreachable';
+  detail?: string;
+}
+
+export function fetchIssueReason(error: unknown): AssetCaptureIssue['reason'] {
+  const code = typeof error === 'object' && error !== null && 'code' in error
+    ? String((error as { code?: unknown }).code ?? '')
+    : '';
+  const message = error instanceof Error ? error.message : String(error);
+  return code === 'ENOTFOUND' || /\b(?:ENOTFOUND|ERR_NAME_NOT_RESOLVED)\b/i.test(message)
+    ? 'source-unreachable'
+    : 'fetch-failed';
+}
+
 const MAX_BODY_BYTES = 50 * 1024 * 1024;
 
 const SKIP_HOST_PATTERNS = [
@@ -53,6 +75,7 @@ export class AssetStore {
   private records = new Map<string, AssetRecord>();
   /** original URL → local path (so the rewriter can lookup any URL it sees) */
   private urlToLocalPath = new Map<string, string>();
+  private captureIssues: AssetCaptureIssue[] = [];
 
   record(originalUrl: string, body: Buffer, contentType: string): AssetRecord {
     return this.recordInternal(originalUrl, body, contentType, false);
@@ -119,6 +142,15 @@ export class AssetStore {
   urlMap(): ReadonlyMap<string, string> {
     return this.urlToLocalPath;
   }
+
+  recordIssue(issue: AssetCaptureIssue): void {
+    if (this.captureIssues.some((item) => item.url === issue.url && item.reason === issue.reason)) return;
+    this.captureIssues.push(issue);
+  }
+
+  issues(): readonly AssetCaptureIssue[] {
+    return this.captureIssues;
+  }
 }
 
 export interface InterceptorOptions {
@@ -140,6 +172,16 @@ export async function installAssetInterceptor(
       return;
     }
 
+    if (request.resourceType() === 'document' && request.frame().parentFrame() && isGpuRiskyEmbedUrl(url)) {
+      logger.debug({ url }, 'gpu-risky-embed-stabilized-for-capture');
+      await route.fulfill({
+        status: 200,
+        contentType: 'text/html; charset=utf-8',
+        body: stableEmbedDocument(url),
+      });
+      return;
+    }
+
     if (shouldSkip(url)) {
       // Replace tracking calls with a 204 no-content so the page doesn't error
       await route.fulfill({ status: 204, body: '' });
@@ -158,6 +200,7 @@ export async function installAssetInterceptor(
       let body: Buffer;
       if (contentLength && contentLength > MAX_BODY_BYTES) {
         logger.warn({ url, contentLength }, 'asset-too-large-skipping-capture');
+        store.recordIssue({ url, reason: 'too-large', detail: `content-length=${contentLength}` });
         await route.continue();
         return;
       }
@@ -166,6 +209,7 @@ export async function installAssetInterceptor(
         body = await response.body();
       } catch (err) {
         logger.warn({ url, err: (err as Error).message }, 'asset-body-read-error');
+        store.recordIssue({ url, reason: 'body-read-failed', detail: (err as Error).message });
         await route.continue();
         return;
       }
@@ -180,14 +224,48 @@ export async function installAssetInterceptor(
         store.record(url, body, contentType);
       } else if (!isPageDocument) {
         logger.debug({ url }, 'asset-skipped-privacy-blocklist');
+        store.recordIssue({ url: redactIssueUrl(url), reason: 'privacy-excluded' });
       }
 
       await route.fulfill({ response, body });
     } catch (err) {
       logger.debug({ url, err: (err as Error).message }, 'route-fetch-failed-continuing');
+      store.recordIssue({ url, reason: fetchIssueReason(err), detail: (err as Error).message });
       await route.continue().catch(() => undefined);
     }
   });
+}
+
+export function isGpuRiskyEmbedUrl(value: string): boolean {
+  try {
+    return /(?:^|\.)(?:youtube(?:-nocookie)?\.com|youtu\.be|vimeo\.com)$/i.test(new URL(value).hostname);
+  } catch {
+    return false;
+  }
+}
+
+function stableEmbedDocument(value: string): string {
+  const parsed = new URL(value);
+  const youtubeId = /youtube(?:-nocookie)?\.com$/i.test(parsed.hostname)
+    ? parsed.pathname.match(/^\/embed\/([A-Za-z0-9_-]{6,})/)?.[1]
+    : undefined;
+  const background = youtubeId
+    ? `background:#111 url(https://i.ytimg.com/vi/${youtubeId}/hqdefault.jpg) center/cover no-repeat;`
+    : 'background:#111;';
+  return '<!doctype html><meta name="color-scheme" content="dark">' +
+    `<style>html,body{height:100%;margin:0}body{display:grid;place-items:center;${background}color:#fff;font:14px/1.4 sans-serif;text-align:center}span{padding:8px 12px;background:#000a;border-radius:4px}</style>` +
+    '<body><span>Embedded media preserved in source evidence</span></body>';
+}
+
+function redactIssueUrl(value: string): string {
+  try {
+    const parsed = new URL(value);
+    parsed.search = '';
+    parsed.hash = '';
+    return parsed.href;
+  } catch {
+    return '[redacted URL]';
+  }
 }
 
 function shouldSkip(url: string): boolean {

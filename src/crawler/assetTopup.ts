@@ -1,7 +1,7 @@
 import * as cheerio from 'cheerio';
 import parseSrcset from 'parse-srcset';
 import type { BrowserContext } from 'playwright';
-import { AssetStore } from '../interceptor/assetInterceptor.js';
+import { AssetStore, fetchIssueReason } from '../interceptor/assetInterceptor.js';
 import { logger } from '../utils/logger.js';
 import { withRetry } from '../utils/retry.js';
 import { tryParse } from '../utils/urlUtils.js';
@@ -17,12 +17,12 @@ const ASSET_HOST_PATTERNS = [
   /(?:^|\.)framerstatic\.com$/i,
   /(?:^|\.)framercanvas\.com$/i,
   /^framer\.com$/i,  // only path /m/* will be captured (handled by URL filter)
-  /(?:^|\.)ingest\.sentry\.io$/i,
   /(?:^|\.)jspm\.io$/i,
 ];
 
 const ATTRS_TO_SCAN = ['src', 'href', 'data-src', 'data-lazy-src', 'poster', 'content'];
 const SRCSET_ATTRS = ['srcset', 'data-srcset'];
+const MAX_TOPUP_BODY_BYTES = 50 * 1024 * 1024;
 
 export async function topupAssets(
   context: BrowserContext,
@@ -39,7 +39,7 @@ export async function topupAssets(
   }
 
   for (const [pageUrl, html] of pages) {
-    collectAssetUrls(html, pageUrl, candidates, pageOrigins);
+    collectAssetUrls(html, pageUrl, candidates);
   }
 
   let fetched = 0;
@@ -59,7 +59,7 @@ export async function topupAssets(
 
     const missing: string[] = [];
     for (const url of candidates) {
-      if (!store.has(url) && !failedUrls.has(url) && shouldFetchHost(url, pageOrigins)) {
+      if (!store.has(url) && !failedUrls.has(url)) {
         missing.push(url);
       }
     }
@@ -82,16 +82,34 @@ export async function topupAssets(
             const status = response.status();
             if (status >= 400) {
               logger.debug({ url, status }, 'topup-non-2xx');
+              // The request completed and the publisher returned a non-success
+              // response. Preserve that fact as source evidence, but do not
+              // misclassify a broken live reference as an extractor failure.
+              store.recordIssue({ url, reason: 'source-missing', detail: `top-up status=${status}` });
+              failedUrls.add(url);
+              failed += 1;
+              return;
+            }
+            const contentLength = Number(response.headers()['content-length'] ?? 0);
+            if (contentLength > MAX_TOPUP_BODY_BYTES) {
+              store.recordIssue({ url, reason: 'too-large', detail: `top-up content-length=${contentLength}` });
               failedUrls.add(url);
               failed += 1;
               return;
             }
             const body = await response.body();
+            if (body.length > MAX_TOPUP_BODY_BYTES) {
+              store.recordIssue({ url, reason: 'too-large', detail: `top-up body-bytes=${body.length}` });
+              failedUrls.add(url);
+              failed += 1;
+              return;
+            }
             const contentType = response.headers()['content-type'] ?? '';
             store.record(url, body, contentType);
             fetched += 1;
           } catch (err) {
             logger.debug({ url, err: (err as Error).message }, 'topup-fetch-failed');
+            store.recordIssue({ url, reason: fetchIssueReason(err), detail: `top-up: ${(err as Error).message}` });
             failedUrls.add(url);
             failed += 1;
           }
@@ -165,6 +183,7 @@ async function fetchFullFramerCmsFiles(context: BrowserContext, store: AssetStor
           const status = response.status();
           if (status >= 400) {
             logger.debug({ url, status }, 'topup-full-cms-non-2xx');
+            store.recordIssue({ url, reason: 'source-missing', detail: `full CMS top-up status=${status}` });
             return;
           }
           const body = await response.body();
@@ -173,6 +192,7 @@ async function fetchFullFramerCmsFiles(context: BrowserContext, store: AssetStor
           fetched += 1;
         } catch (err) {
           logger.debug({ url, err: (err as Error).message }, 'topup-full-cms-fetch-failed');
+          store.recordIssue({ url, reason: fetchIssueReason(err), detail: `full CMS top-up: ${(err as Error).message}` });
         }
       }),
     );
@@ -257,7 +277,6 @@ function collectAssetUrls(
   html: string,
   baseUrl: string,
   into: Set<string>,
-  allowedOrigins: ReadonlySet<string>,
 ): void {
   const $ = cheerio.load(html);
 
@@ -265,10 +284,21 @@ function collectAssetUrls(
     $(`[${attr}]`).each((_i, el) => {
       const tag = 'tagName' in el ? el.tagName.toLowerCase() : '';
       if (!isAssetAttribute(tag, attr)) return;
+      if (tag === 'link' && attr === 'href' && !isFetchableLinkElement($(el).attr('rel'), $(el).attr('as'))) {
+        return;
+      }
       const value = $(el).attr(attr);
       if (!value) return;
+      if (tag === 'meta' && attr === 'content') {
+        const field = `${$(el).attr('property') ?? ''} ${$(el).attr('name') ?? ''} ${$(el).attr('itemprop') ?? ''}`;
+        if (!/(?:^|[:\s_-])(?:image|video|audio|icon|url)(?:$|[:\s_-])/i.test(field)) return;
+        // Metadata adjacent to a media URL often contains MIME type and numeric
+        // dimensions (og:image:type/width/height). They are descriptors, not
+        // relative paths such as /image/jpeg or /1200.
+        if (/^\s*\d+(?:\.\d+)?\s*$/.test(value) || /^\s*[\w.+-]+\/[\w.+-]+\s*$/.test(value)) return;
+      }
       const abs = tryParse(value, baseUrl)?.toString();
-      if (abs && shouldFetchHost(abs, allowedOrigins)) into.add(abs);
+      if (abs && shouldFetchExplicitAsset(abs)) into.add(abs);
     });
   }
 
@@ -284,7 +314,7 @@ function collectAssetUrls(
       }
       for (const p of parts) {
         const abs = tryParse(p.url, baseUrl)?.toString();
-        if (abs && shouldFetchHost(abs, allowedOrigins)) into.add(abs);
+        if (abs && shouldFetchExplicitAsset(abs)) into.add(abs);
       }
     });
   }
@@ -295,15 +325,43 @@ function collectAssetUrls(
     if (!value || !value.includes('url(')) return;
     for (const m of value.matchAll(/url\(\s*['"]?([^'")]+)['"]?\s*\)/g)) {
       const abs = tryParse(m[1]!, baseUrl)?.toString();
-      if (abs && shouldFetchHost(abs, allowedOrigins)) into.add(abs);
+      if (abs && shouldFetchExplicitAsset(abs)) into.add(abs);
     }
   });
+}
+
+function shouldFetchExplicitAsset(absoluteUrl: string): boolean {
+  const url = tryParse(absoluteUrl);
+  if (!url || (url.protocol !== 'http:' && url.protocol !== 'https:')) return false;
+  const host = url.hostname.toLowerCase();
+  if (/(?:^|\.)(?:events|analytics|telemetry)\.framer\.com$/i.test(host)) return false;
+  if (/(?:^|\.)ingest\.sentry\.io$/i.test(host)) return false;
+  if (host === 'api.framer.com') {
+    return /^\/(?:modules|web\/(?:fontshare|v1\/sites\/hostnames|v2\/projects\/[^/]+\/assets))/i.test(url.pathname);
+  }
+  if (host === 'framer.com' || host === 'www.framer.com') return url.pathname.startsWith('/m/');
+  return true;
 }
 
 function isAssetAttribute(tag: string, attr: string): boolean {
   if (attr === 'href') return tag === 'link' || tag === 'use';
   if (attr === 'content') return tag === 'meta';
   return ['img', 'source', 'video', 'audio', 'iframe', 'script', 'use', 'object', 'embed'].includes(tag);
+}
+
+/**
+ * Connection/navigation hints are URLs, but they are not downloadable assets.
+ * Fetching a bare preconnect origin (for example https://fonts.gstatic.com/) only
+ * creates a misleading 404 in the reconstruction ledger.
+ */
+function isFetchableLinkElement(relValue?: string, asValue?: string): boolean {
+  const rel = new Set((relValue ?? '').toLowerCase().split(/\s+/).filter(Boolean));
+  if (rel.has('dns-prefetch') || rel.has('preconnect') || rel.has('canonical') || rel.has('alternate')) {
+    return false;
+  }
+  if (rel.has('stylesheet') || rel.has('icon') || rel.has('manifest') || rel.has('modulepreload')) return true;
+  if (rel.has('preload') || rel.has('prefetch')) return (asValue ?? '').toLowerCase() !== 'document';
+  return false;
 }
 
 function shouldFetchHost(absoluteUrl: string, allowedOrigins: ReadonlySet<string> = new Set()): boolean {

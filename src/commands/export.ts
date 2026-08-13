@@ -8,7 +8,9 @@ import { topupAssets } from '../crawler/assetTopup.js';
 import { ensureCleanDir, writeFileEnsured } from '../output/fileWriter.js';
 import { writeManifest, type Manifest } from '../output/manifestWriter.js';
 import { captureReconstruction } from '../reconstruction/capture.js';
+import { captureFramerProject } from '../reconstruction/framerProjectCapture.js';
 import type { CaptureViewport } from '../reconstruction/types.js';
+import { ASTRO_TRACKER_FILENAME, STANDALONE_FILENAME } from '../reconstruction/standaloneTracker.js';
 import { writeReconstructionPackage } from '../reconstruction/writer.js';
 import { rewriteCss } from '../rewriter/cssRewriter.js';
 import { rewriteHtml, type StaticEventPreview, type StaticInteractionSnapshot } from '../rewriter/htmlRewriter.js';
@@ -44,18 +46,27 @@ export interface ExportCommandOptions {
   subscribeRedirect?: { url: string; text?: string };
   /** Force browser and static output theme. */
   forceTheme?: ForcedTheme;
-  /** Emit the structured, responsive LLM reconstruction package. Defaults to true. */
+  /** Emit the two-file Astro handoff. Defaults to true. */
   reconstruction?: boolean;
   /** Responsive viewport matrix used by the reconstruction capture. */
   reconstructionViewports?: CaptureViewport[];
+  /** Discover and probe authored breakpoints around the requested viewports. */
+  adaptiveViewports?: boolean;
+  /** Optional authorized Framer editor project for design-time enrichment. */
+  framerProjectUrl?: string;
+  /** API key resolved by the CLI from an environment variable. */
+  framerApiKey?: string;
 }
 
 export async function runExport(opts: ExportCommandOptions): Promise<void> {
   const outDir = path.resolve(opts.outDir);
   const reconstructionEnabled = opts.reconstruction ?? true;
-  const effectiveMultiPage = Boolean(opts.multiPage || reconstructionEnabled);
-  const shouldLocalizeAssets = Boolean(opts.localizeAssets || reconstructionEnabled);
-  const effectiveStayLocal = Boolean(opts.stayLocal || reconstructionEnabled);
+  // The default reconstruction handoff is intentionally only two files. Keep the
+  // old static mirror available behind --no-reconstruction for callers that still
+  // need an assets directory, a manifest, or multiple HTML pages.
+  const effectiveMultiPage = !reconstructionEnabled && Boolean(opts.multiPage);
+  const shouldLocalizeAssets = !reconstructionEnabled && Boolean(opts.localizeAssets);
+  const effectiveStayLocal = !reconstructionEnabled && Boolean(opts.stayLocal);
   await ensureCleanDir(outDir);
 
   const session = await openSession({
@@ -79,6 +90,9 @@ export async function runExport(opts: ExportCommandOptions): Promise<void> {
       }
     }
     logger.info({ providedUrl: opts.url, liveUrl }, 'start-url-resolved');
+    const projectEvidencePromise = reconstructionEnabled && opts.framerProjectUrl
+      ? captureFramerProject(opts.framerProjectUrl, opts.framerApiKey)
+      : Promise.resolve(undefined);
 
     const startHost = new URL(liveUrl).hostname;
     const store = new AssetStore();
@@ -93,7 +107,10 @@ export async function runExport(opts: ExportCommandOptions): Promise<void> {
       startUrl: liveUrl,
       additionalUrls: opts.includeUrls,
       concurrency: 1,
-      maxDepth: opts.maxDepth ?? (effectiveMultiPage ? DEFAULT_MULTI_PAGE_MAX_DEPTH : 0),
+      // Reconstruction is a site handoff, so discover same-origin routes by
+      // default. Callers that deliberately want one page can still pass
+      // --max-depth 0.
+      maxDepth: opts.maxDepth ?? (reconstructionEnabled || effectiveMultiPage ? DEFAULT_MULTI_PAGE_MAX_DEPTH : 0),
       viewportWidth: opts.viewportWidth,
       viewportHeight: 900,
       scroll: opts.scroll,
@@ -103,20 +120,70 @@ export async function runExport(opts: ExportCommandOptions): Promise<void> {
     });
 
     logger.info({ pages: crawlResult.pages.size, assets: store.size() }, 'crawl-finished');
-    const replayPages = chooseReplayPages(crawlResult.pages, crawlResult.sourcePages);
-    const reconstructionCapture = reconstructionEnabled
-      ? await captureReconstruction(session.context, crawlResult.pages.keys(), {
-          viewports: opts.reconstructionViewports,
-          forceTheme: opts.forceTheme,
-          scroll: opts.scroll,
-          pageTimeoutMs: 60_000,
-        })
-      : undefined;
-    const interactionSnapshots = await captureInteractionSnapshots(session.context, crawlResult.pages, crawlResult.origin, {
-      viewportWidth: opts.viewportWidth,
-      viewportHeight: 900,
-      forceTheme: opts.forceTheme,
+    const replayPages = chooseReplayPages(crawlResult.pages, crawlResult.sourcePages, {
+      preferHydrated: reconstructionEnabled && isWaybackReplayUrl(liveUrl),
     });
+    const interactionSnapshots = reconstructionEnabled
+      ? {}
+      : await captureInteractionSnapshots(session.context, crawlResult.pages, crawlResult.origin, {
+          viewportWidth: opts.viewportWidth,
+          viewportHeight: 900,
+          forceTheme: opts.forceTheme,
+        });
+
+    if (reconstructionEnabled) {
+      const reconstructionCapture = await captureReconstruction(session.context, crawlResult.pages.keys(), {
+        viewports: opts.reconstructionViewports,
+        forceTheme: opts.forceTheme,
+        scroll: opts.scroll,
+        pageTimeoutMs: 60_000,
+        adaptiveViewports: opts.adaptiveViewports ?? true,
+        requestedUrls: crawlResult.discoveredUrls,
+        initialFailedRoutes: crawlResult.failures,
+      });
+      // The two-file package embeds captured asset bodies inside its non-executing
+      // evidence capsule. Top-up catches srcset, favicon, and lazy variants that
+      // were referenced by HTML/CSS but not requested at the active widths.
+      await topupAssets(session.context, replayPages, store);
+      const standalone = await prepareSingleHtml(replayPages, crawlResult.origin, store, {
+        liveUrl,
+        // A two-file handoff cannot reference a generated assets directory. Keep
+        // the standalone HTML as the rendered page source with its original media
+        // URLs; the tracker records every URL that Astro must localize or audit.
+        localizeAssets: false,
+        canonicalUrl: opts.canonicalUrl,
+        stripSelectors: opts.stripSelectors,
+        subscribeRedirect: opts.subscribeRedirect,
+        stayLocal: false,
+        multiPage: false,
+        pageStyles: crawlResult.pageStyles,
+        forceTheme: opts.forceTheme,
+        staticSnapshot: isWaybackReplayUrl(liveUrl),
+      });
+      await writeReconstructionPackage(outDir, {
+        sourceUrl: liveUrl,
+        standaloneHtml: standalone.html,
+        origin: crawlResult.origin,
+        capture: reconstructionCapture,
+        rawPages: crawlResult.pages,
+        sourcePages: crawlResult.sourcePages,
+        pageStyles: crawlResult.pageStyles,
+        store,
+        projectEvidence: await projectEvidencePromise,
+      });
+
+      logger.info({
+        pages: reconstructionCapture.pages.length,
+        assets: store.size(),
+        bytesBeforeEvidence: Buffer.byteLength(standalone.html),
+      }, 'export-complete');
+      process.stderr.write(
+        `\nDone. Standalone Astro source and migration tracker saved to ${outDir}\n` +
+          `Standalone HTML: ${path.join(outDir, STANDALONE_FILENAME)}\n` +
+          `Astro tracker: ${path.join(outDir, ASTRO_TRACKER_FILENAME)}\n\n`,
+      );
+      return;
+    }
 
     if (shouldLocalizeAssets) {
       logger.info('starting-topup');
@@ -187,29 +254,12 @@ export default createEditorBar;
     });
     await writeManifest(outDir, manifest);
 
-    if (reconstructionCapture) {
-      await writeReconstructionPackage(outDir, {
-        sourceUrl: liveUrl,
-        origin: crawlResult.origin,
-        capture: reconstructionCapture,
-        rawPages: crawlResult.pages,
-        sourcePages: crawlResult.sourcePages,
-        pageStyles: crawlResult.pageStyles,
-        store,
-        openStateSnapshots: interactionSnapshots,
-      });
-    }
-
     logger.info(
       { pages: manifest.totals.pages, assets: manifest.totals.assets, bytes: manifest.totals.assetBytes },
       'export-complete',
     );
     process.stderr.write(
-      `\nDone. ${manifest.totals.pages} page(s), ${manifest.totals.assets} asset(s) saved to ${outDir}\n` +
-        (reconstructionCapture
-          ? `LLM entry point: ${path.join(outDir, 'LLM_HANDOFF.md')} (share the entire export directory)\n`
-          : '') +
-        '\n',
+      `\nDone. ${manifest.totals.pages} page(s), ${manifest.totals.assets} asset(s) saved to ${outDir}\n\n`,
     );
   } finally {
     await session.close();
@@ -1019,6 +1069,7 @@ interface SingleHtmlOptions {
   interactionSnapshots?: Record<string, StaticInteractionSnapshot>;
   pageStyles?: Map<string, string>;
   forceTheme?: ForcedTheme;
+  staticSnapshot?: boolean;
 }
 
 export async function prepareSingleHtml(
@@ -1084,13 +1135,18 @@ async function prepareHtmlPage(
     pageLookup,
     pageFallback,
     preserveFramerHydrationTargets: isFramerDocument,
-    staticRuntimeFixes: !isFramerDocument && !isFrameworkSource,
+    staticRuntimeFixes: !opts.staticSnapshot && !isFramerDocument && !isFrameworkSource,
     runtimePageMap,
     runtimeEventPreviewMap,
     runtimeInteractionSnapshotMap: opts.interactionSnapshots,
-    injectRuntimePageLinkRewriter: !isFrameworkSource,
-    frameworkVisibilityFallback: isFrameworkSource,
-    capturedPageCss: isFramerDocument || isFrameworkSource ? undefined : opts.pageStyles?.get(url),
+    injectRuntimePageLinkRewriter: !opts.staticSnapshot && !isFrameworkSource,
+    frameworkVisibilityFallback: !opts.staticSnapshot && isFrameworkSource,
+    staticSnapshot: opts.staticSnapshot,
+    capturedPageCss: opts.staticSnapshot
+      ? opts.pageStyles?.get(url)
+      : isFramerDocument || isFrameworkSource
+        ? undefined
+        : opts.pageStyles?.get(url),
     forceTheme: opts.forceTheme,
     stayLocal: opts.stayLocal,
     canonicalUrl: opts.canonicalUrl,
@@ -1303,12 +1359,13 @@ function detectFrameworkSourceDocument(html: string): boolean {
 export function chooseReplayPages(
   hydratedPages: Map<string, string>,
   sourcePages: Map<string, string>,
+  opts: { preferHydrated?: boolean } = {},
 ): Map<string, string> {
   const replay = new Map<string, string>();
   let sourceCount = 0;
   for (const [url, hydrated] of hydratedPages) {
     const source = sourcePages.get(url);
-    if (source?.trim() && !detectFramerDocument(hydrated) && !detectFramerDocument(source)) {
+    if (!opts.preferHydrated && source?.trim() && !detectFramerDocument(hydrated) && !detectFramerDocument(source)) {
       replay.set(url, source);
       sourceCount += 1;
     } else {
@@ -1317,6 +1374,15 @@ export function chooseReplayPages(
   }
   logger.info({ sourceResponses: sourceCount, hydrated: replay.size - sourceCount }, 'replay-html-selected');
   return replay;
+}
+
+function isWaybackReplayUrl(url: string): boolean {
+  try {
+    const parsed = new URL(url);
+    return parsed.hostname === 'web.archive.org' && /^\/web\/\d+/.test(parsed.pathname);
+  } catch {
+    return false;
+  }
 }
 
 function buildManifest(

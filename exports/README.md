@@ -1,14 +1,19 @@
 # Local exports
 
-This directory intentionally contains no captures in Git. Generated reconstruction packages can be large and may contain captured site or session data, so every item here except this note is ignored.
+Generated exports are ignored by Git.
 
-Create an export locally from the repository root:
+Create one from the repository root:
 
 ```bash
 npm install
-npm run dev -- export https://example.com/ --no-serve
+npm run dev -- export https://example.framer.website/ --no-serve
 ```
 
-Then give the reconstruction agent the absolute path to the complete generated directory, such as `exports/example-export/`, and tell it to read `LLM_HANDOFF.md` first. The Markdown file is only the entry point; the neighboring screenshots, assets, fonts, DOM, CSS, and JSON evidence are also required.
+Each default export contains only:
 
-For the cross-repository workflow, see [`../RECONSTRUCTION_AGENT.md`](../RECONSTRUCTION_AGENT.md).
+```text
+standalone.html
+ASTRO_MIGRATION_TRACKER.csv
+```
+
+Give an Astro reconstruction agent both files. The HTML is the replayable source and contains a non-executing schema-v2 evidence capsule with screenshots, geometry, styles, states, accessibility, diagnostics, and content-deduplicated embedded asset bodies (`assets[].blobIndex` → `assetBlobs[].dataUrl`). The CSV is the completion tracker.

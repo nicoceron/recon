@@ -56,6 +56,8 @@ export interface HtmlRewriteContext {
   injectRuntimePageLinkRewriter?: boolean;
   /** Reveal SSR content if a framework's client animation bootstrap never runs. */
   frameworkVisibilityFallback?: boolean;
+  /** Freeze an already-hydrated DOM without replaying framework or archive runtimes. */
+  staticSnapshot?: boolean;
   /** Accessible page-level CSSOM captured from the browser after hydration. */
   capturedPageCss?: string;
   /** Force the static output to keep this theme instead of following local system preference. */
@@ -111,6 +113,13 @@ const SRCSET_ATTRS: Array<{ selector: string; attr: string }> = [
 
 export async function rewriteHtml(html: string, ctx: HtmlRewriteContext): Promise<string> {
   const $ = cheerio.load(html);
+
+  if (ctx.staticSnapshot) {
+    $('#wm-ipp-base,#wm-ipp-print,#wm-ipp').remove();
+    $('script').not('[type="application/ld+json"]').remove();
+    $('link[href*="web-static.archive.org/_static/"]').remove();
+    $('head').append('<style data-static-snapshot-visibility="1">.invisible{visibility:visible!important;opacity:1!important}</style>');
+  }
 
   // Strip every Framer owner-only UI element that gets serialized into the
   // captured HTML when the crawler is logged in to Framer. These render

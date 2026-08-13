@@ -37,6 +37,10 @@ export interface CrawlResult {
   sourcePages: Map<string, string>;
   /** Origin (scheme://host) of the start URL */
   origin: string;
+  /** Every normalized route selected by start/link/sitemap discovery. */
+  discoveredUrls: string[];
+  /** Routes selected for crawling that could not be captured. */
+  failures: Array<{ url: string; reason: string }>;
 }
 
 /**
@@ -66,6 +70,7 @@ export async function crawlSite(context: BrowserContext, opts: CrawlOptions): Pr
   const pages = new Map<string, string>();
   const pageStyles = new Map<string, string>();
   const sourcePages = new Map<string, string>();
+  const failures: Array<{ url: string; reason: string }> = [];
   const visited = new Set<string>([startNormalized]);
   const queue: Array<{ url: string; depth: number }> = [{ url: startNormalized, depth: 0 }];
   for (const additionalUrl of opts.additionalUrls ?? []) {
@@ -107,7 +112,9 @@ export async function crawlSite(context: BrowserContext, opts: CrawlOptions): Pr
               }
             }
           } catch (err) {
-            logger.error({ url: next.url, err: (err as Error).message }, 'page-crawl-failed');
+            const reason = (err as Error).message;
+            failures.push({ url: next.url, reason });
+            logger.error({ url: next.url, err: reason }, 'page-crawl-failed');
           } finally {
             inFlight -= 1;
           }
@@ -120,10 +127,10 @@ export async function crawlSite(context: BrowserContext, opts: CrawlOptions): Pr
   await pQueue.onIdle();
 
   logger.info({ pages: pages.size, visited: visited.size, origin }, 'crawl-complete');
-  return { pages, pageStyles, sourcePages, origin };
+  return { pages, pageStyles, sourcePages, origin, discoveredUrls: [...visited], failures };
 }
 
-async function crawlOnePage(
+export async function crawlOnePage(
   context: BrowserContext,
   url: string,
   opts: CrawlOptions,
@@ -132,33 +139,68 @@ async function crawlOnePage(
   await page.setViewportSize({ width: opts.viewportWidth, height: opts.viewportHeight });
   await installForcedTheme(page, opts.forceTheme);
   try {
-    logger.info({ url }, 'crawling-page');
-    const response = await page.goto(url, { waitUntil: 'domcontentloaded', timeout: opts.pageTimeoutMs });
-    const sourceHtml = await response?.text().catch(() => undefined);
+    const maxAttempts = isWaybackReplayUrl(url) ? 4 : 1;
+    for (let attempt = 1; attempt <= maxAttempts; attempt += 1) {
+      logger.info({ url, attempt, maxAttempts }, 'crawling-page');
+      const response = await page.goto(url, { waitUntil: 'domcontentloaded', timeout: opts.pageTimeoutMs }).catch(async (err) => {
+        if (attempt === maxAttempts) throw err;
+        logger.warn({ url, attempt, maxAttempts, err: (err as Error).message }, 'wayback-navigation-failed-retrying');
+        await sleep(1_000 * attempt);
+        return undefined;
+      });
+      if (!response) continue;
+      const sourceHtml = await response?.text().catch(() => undefined);
 
-    try {
-      await page.waitForLoadState('networkidle', { timeout: 30_000 });
-    } catch {
-      logger.debug({ url }, 'networkidle-timeout-falling-back-to-load');
-      await page.waitForLoadState('load', { timeout: 10_000 }).catch(() => undefined);
+      try {
+        await page.waitForLoadState('networkidle', { timeout: 30_000 });
+      } catch {
+        logger.debug({ url }, 'networkidle-timeout-falling-back-to-load');
+        await page.waitForLoadState('load', { timeout: 10_000 }).catch(() => undefined);
+      }
+      await applyForcedTheme(page, opts.forceTheme);
+
+      if (opts.scroll) {
+        await scrollPage(page);
+      }
+
+      await applyForcedTheme(page, opts.forceTheme);
+      await inlineGoogleMapIframes(page, url);
+      await applyForcedTheme(page, opts.forceTheme);
+      await page.evaluate(() => window.scrollTo(0, 0)).catch(() => undefined);
+      await sleep(200);
+
+      const html = await page.content();
+      if (isIncompleteWaybackCapture(url, html)) {
+        if (attempt === maxAttempts) {
+          throw new Error(`Wayback replay remained incomplete after ${maxAttempts} attempts: ${url}`);
+        }
+        logger.warn({ url, attempt, maxAttempts }, 'wayback-capture-incomplete-retrying');
+        await sleep(1_000 * attempt);
+        continue;
+      }
+
+      const styles = await collectAccessibleCss(page);
+      return { html, sourceHtml, styles };
     }
-    await applyForcedTheme(page, opts.forceTheme);
-
-    if (opts.scroll) {
-      await scrollPage(page);
-    }
-
-    await applyForcedTheme(page, opts.forceTheme);
-    await inlineGoogleMapIframes(page, url);
-    await applyForcedTheme(page, opts.forceTheme);
-    await page.evaluate(() => window.scrollTo(0, 0)).catch(() => undefined);
-    await sleep(200);
-
-    const styles = await collectAccessibleCss(page);
-    return { html: await page.content(), sourceHtml, styles };
+    throw new Error(`Could not capture page: ${url}`);
   } finally {
     await page.close().catch(() => undefined);
   }
+}
+
+function isWaybackReplayUrl(url: string): boolean {
+  try {
+    const parsed = new URL(url);
+    return parsed.hostname === 'web.archive.org' && /^\/web\/\d+/.test(parsed.pathname);
+  } catch {
+    return false;
+  }
+}
+
+export function isIncompleteWaybackCapture(url: string, html: string): boolean {
+  if (!isWaybackReplayUrl(url)) return false;
+  if (/Application error:\s*a client-side exception has occurred/i.test(html)) return true;
+  return /id=["']module-(?:platform|droid-computers|analytics|agent-readiness|missions)["'][^>]*>\s*<div[^>]*style=["'][^"']*min-height\s*:\s*\d+px[^"']*["'][^>]*>\s*<\/div>\s*<\/div>/i.test(html);
 }
 
 async function collectAccessibleCss(page: Page): Promise<string> {
@@ -193,21 +235,79 @@ async function collectAccessibleCss(page: Page): Promise<string> {
 }
 
 /**
- * Scroll the page in 5 steps to trigger lazy-loaded images / IntersectionObserver assets.
+ * Scroll the page to trigger lazy-loaded content. Client-heavy pages may
+ * virtualize whole modules, so retain the richest DOM observed for each module
+ * and freeze canvas pixels before the runtime unmounts them again.
  */
-async function scrollPage(page: Page): Promise<void> {
+export async function scrollPage(page: Page): Promise<void> {
   try {
     const scrollHeight = await page.evaluate(() => document.body.scrollHeight);
     const steps = 5;
-    for (let i = 1; i <= steps; i += 1) {
-      const y = Math.floor((scrollHeight * i) / steps);
+    const moduleTargets = await page.evaluate(() => Array.from(document.querySelectorAll<HTMLElement>('[id^="module-"]'))
+      .map((element) => Math.max(0, Math.floor(element.getBoundingClientRect().top + window.scrollY - window.innerHeight * 0.2))));
+    const targets = [...new Set([
+      0,
+      ...moduleTargets,
+      ...Array.from({ length: steps }, (_, index) => Math.floor((scrollHeight * (index + 1)) / steps)),
+    ])].sort((a, b) => a - b);
+
+    await recordLazyModuleSnapshots(page);
+    for (const y of targets) {
       await page.evaluate((target) => window.scrollTo(0, target), y);
       await page.waitForLoadState('networkidle', { timeout: 5_000 }).catch(() => undefined);
-      await sleep(300);
+      await sleep(500);
+      await recordLazyModuleSnapshots(page);
     }
     await page.evaluate(() => window.scrollTo(0, 0));
     await sleep(200);
+    await restoreLazyModuleSnapshots(page);
   } catch (err) {
     logger.debug({ err: (err as Error).message }, 'scroll-error-ignored');
   }
+}
+
+async function recordLazyModuleSnapshots(page: Page): Promise<void> {
+  await page.evaluate(`(() => {
+    const scope = window;
+    const store = scope.__STATIC_MODULE_SNAPSHOTS__ || (scope.__STATIC_MODULE_SNAPSHOTS__ = {});
+    document.querySelectorAll('[id^="module-"]').forEach((module) => {
+      if (!module.id) return;
+      const clone = module.cloneNode(true);
+      const liveCanvases = Array.from(module.querySelectorAll('canvas'));
+      Array.from(clone.querySelectorAll('canvas')).forEach((canvas, index) => {
+        const live = liveCanvases[index];
+        if (!live) return;
+        try {
+          const image = document.createElement('img');
+          image.setAttribute('data-static-canvas-snapshot', '1');
+          image.alt = live.getAttribute('aria-label') || live.getAttribute('title') || '';
+          image.className = live.className || '';
+          image.setAttribute('style', live.getAttribute('style') || '');
+          image.width = live.width;
+          image.height = live.height;
+          image.src = live.toDataURL('image/png');
+          canvas.replaceWith(image);
+        } catch (_) {
+          // A tainted canvas cannot be serialized; keep its semantic element.
+        }
+      });
+      const text = (clone.textContent || '').replace(/\s+/g, ' ').trim();
+      const elements = clone.querySelectorAll('*').length;
+      const placeholderOnly = !text && elements <= 1 && Boolean(clone.querySelector('[style*="min-height"]'));
+      if (placeholderOnly) return;
+      const html = clone.innerHTML;
+      const score = elements * 1000 + text.length + html.length;
+      if (!store[module.id] || score > store[module.id].score) store[module.id] = { html, score };
+    });
+  })()`);
+}
+
+async function restoreLazyModuleSnapshots(page: Page): Promise<void> {
+  await page.evaluate(`(() => {
+    const store = window.__STATIC_MODULE_SNAPSHOTS__ || {};
+    Object.keys(store).forEach((id) => {
+      const module = document.getElementById(id);
+      if (module) module.innerHTML = store[id].html;
+    });
+  })()`);
 }

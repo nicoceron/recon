@@ -116,4 +116,150 @@ describe('collectUrlsFromText', () => {
     ]);
     expect(fetched).not.toContain('https://example.com/pricing');
   });
+
+  it('does not treat ordinary meta content as a relative asset URL', async () => {
+    const store = new AssetStore();
+    const pages = new Map([
+      [
+        'https://example.com/',
+        '<meta name="description" content="A concise page description">' +
+          '<meta property="og:image" content="/social.png">' +
+          '<meta property="og:image:type" content="image/png">' +
+          '<meta property="og:image:width" content="1200">' +
+          '<meta property="og:image:height" content="630">',
+      ],
+    ]);
+    const fetched: string[] = [];
+    const context = {
+      request: {
+        fetch: async (url: string) => {
+          fetched.push(url);
+          return {
+            status: () => 200,
+            body: async () => Buffer.from('image'),
+            headers: () => ({ 'content-type': 'image/png' }),
+          };
+        },
+      },
+    } as unknown as BrowserContext;
+
+    await topupAssets(context, pages, store);
+
+    expect(fetched).toEqual(['https://example.com/social.png']);
+    expect(fetched).not.toContain('https://example.com/A%20concise%20page%20description');
+    expect(fetched).not.toContain('https://example.com/image/png');
+    expect(fetched).not.toContain('https://example.com/1200');
+    expect(fetched).not.toContain('https://example.com/630');
+  });
+
+  it('ignores connection and navigation link hints while retaining fetchable link assets', async () => {
+    const store = new AssetStore();
+    const pages = new Map([
+      [
+        'https://example.com/',
+        '<link rel="preconnect" href="https://fonts.gstatic.com/">' +
+          '<link rel="canonical" href="https://example.com/">' +
+          '<link rel="stylesheet" href="https://cdn.assets.test/site.css">' +
+          '<link rel="preload" as="font" href="https://cdn.assets.test/site.woff2">',
+      ],
+    ]);
+    const fetched: string[] = [];
+    const context = {
+      request: {
+        fetch: async (url: string) => {
+          fetched.push(url);
+          return {
+            status: () => 200,
+            body: async () => Buffer.from('asset'),
+            headers: () => ({ 'content-type': url.endsWith('.css') ? 'text/css' : 'font/woff2' }),
+          };
+        },
+      },
+    } as unknown as BrowserContext;
+
+    await topupAssets(context, pages, store);
+
+    expect(fetched).toEqual([
+      'https://cdn.assets.test/site.css',
+      'https://cdn.assets.test/site.woff2',
+    ]);
+  });
+
+  it('tops up explicitly referenced assets from arbitrary CDN hosts', async () => {
+    const store = new AssetStore();
+    const pages = new Map([
+      ['https://example.com/', '<img srcset="https://cdn.assets.test/hero-400.webp 400w, https://cdn.assets.test/hero-1600.webp 1600w">'],
+    ]);
+    const fetched: string[] = [];
+    const context = {
+      request: {
+        fetch: async (url: string) => {
+          fetched.push(url);
+          return {
+            status: () => 200,
+            body: async () => Buffer.from('image'),
+            headers: () => ({ 'content-type': 'image/webp' }),
+          };
+        },
+      },
+    } as unknown as BrowserContext;
+
+    await topupAssets(context, pages, store);
+
+    expect(fetched).toEqual([
+      'https://cdn.assets.test/hero-400.webp',
+      'https://cdn.assets.test/hero-1600.webp',
+    ]);
+  });
+
+  it('records publisher non-success responses as source warnings', async () => {
+    const store = new AssetStore();
+    const pages = new Map([
+      ['https://example.com/', '<link rel="icon" href="/missing-favicon.png">'],
+    ]);
+    const context = {
+      request: {
+        fetch: async () => ({
+          status: () => 404,
+          body: async () => Buffer.alloc(0),
+          headers: () => ({ 'content-type': 'text/html' }),
+        }),
+      },
+    } as unknown as BrowserContext;
+
+    const result = await topupAssets(context, pages, store);
+
+    expect(result).toMatchObject({ fetched: 0, failed: 1 });
+    expect(store.issues()).toEqual([
+      {
+        url: 'https://example.com/missing-favicon.png',
+        reason: 'source-missing',
+        detail: 'top-up status=404',
+      },
+    ]);
+  });
+
+  it('records an unresolvable source host separately from transient fetch failures', async () => {
+    const store = new AssetStore();
+    const pages = new Map([
+      ['https://example.com/', '<script src="https://retired-cdn.invalid/embed.js"></script>'],
+    ]);
+    const context = {
+      request: {
+        fetch: async () => {
+          throw new Error('getaddrinfo ENOTFOUND retired-cdn.invalid');
+        },
+      },
+    } as unknown as BrowserContext;
+
+    await topupAssets(context, pages, store);
+
+    expect(store.issues()).toEqual([
+      {
+        url: 'https://retired-cdn.invalid/embed.js',
+        reason: 'source-unreachable',
+        detail: 'top-up: getaddrinfo ENOTFOUND retired-cdn.invalid',
+      },
+    ]);
+  });
 });
